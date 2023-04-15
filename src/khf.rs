@@ -1,10 +1,4 @@
-use crate::{
-    aliases::{Key, Pos},
-    error::Error,
-    node::Node,
-    topology::Topology,
-    KeyManagementScheme,
-};
+use crate::{aliases::Key, error::Error, node::Node, topology::Topology, KeyManagementScheme};
 use hasher::prelude::*;
 use rand::{CryptoRng, RngCore};
 use std::{cmp::Ordering, collections::BTreeSet, fmt};
@@ -185,69 +179,12 @@ where
     H: Hasher<N>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fn fmt_root<H, const N: usize>(
-            f: &mut fmt::Formatter,
-            root: &Node<H, N>,
-            topology: &Topology,
-            prefix: String,
-            pos: Pos,
-            last: bool,
-        ) -> fmt::Result
-        where
-            H: Hasher<N>,
-        {
-            if let Some(width) = f.width() {
-                write!(f, "{}", " ".repeat(width))?;
-            }
-
-            if pos == root.pos {
-                write!(f, "> {} ({}, {})", hex::encode(&root.key), pos.0, pos.1)?;
-            } else {
-                write!(f, "{}{} ", prefix, if last { "└───" } else { "├───" })?;
-                write!(
-                    f,
-                    "{} ({}, {})",
-                    hex::encode(root.derive(topology, pos)),
-                    pos.0,
-                    pos.1
-                )?;
-            }
-
-            if root.pos != (0, 0) && pos != (topology.height() - 1, topology.end(root.pos) - 1) {
-                writeln!(f)?;
-            }
-
-            if pos.0 < topology.height() - 1 {
-                for i in 0..topology.fanout(pos.0) {
-                    let prefix = prefix.clone()
-                        + if pos == root.pos {
-                            ""
-                        } else if last {
-                            "     "
-                        } else {
-                            "│    "
-                        };
-                    fmt_root::<H, N>(
-                        f,
-                        root,
-                        topology,
-                        prefix,
-                        (pos.0 + 1, pos.1 * topology.fanout(pos.0) + i),
-                        i + 1 == topology.fanout(pos.0),
-                    )?;
-                }
-            }
-
-            Ok(())
-        }
-
         for (i, root) in self.roots.iter().enumerate() {
-            fmt_root::<H, N>(f, root, &self.topology, "".into(), root.pos, true)?;
+            root.fmt(f, &self.topology)?;
             if i + 1 != self.roots.len() {
                 writeln!(f)?;
             }
         }
-
         Ok(())
     }
 }

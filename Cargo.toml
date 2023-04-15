@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rand = "0.8.5"
 hasher = { git = "ssh://git@github.com/lemosyne/hasher.git" }
-thiserror = "1.0.40"
 hex = "0.4.3"
+kms = { git = "ssh://git@github.com/lemosyne/kms.git" }
+rand = "0.8.5"
+thiserror = "1.0.40"

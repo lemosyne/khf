@@ -1,5 +1,6 @@
-use crate::{aliases::Key, error::Error, node::Node, topology::Topology, KeyManagementScheme};
+use crate::{aliases::Key, node::Node, topology::Topology};
 use hasher::prelude::*;
+use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
 use std::{cmp::Ordering, collections::BTreeSet, fmt};
 
@@ -118,7 +119,6 @@ where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
-    type Error = Error;
     type Init = R;
     type Key = Key<N>;
     type Id = u64;
@@ -167,10 +167,6 @@ where
         }
         self.updated.clear();
         self.update_master_key();
-    }
-
-    fn persist<W: std::io::Write>(&mut self, _loc: W) -> Result<(), Self::Error> {
-        todo!()
     }
 }
 

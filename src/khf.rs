@@ -1,16 +1,23 @@
 use crate::{aliases::Key, node::Node, topology::Topology};
-use hasher::prelude::*;
+use hasher::prelude::Hasher;
 use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
 use std::{cmp::Ordering, collections::BTreeSet, fmt};
 
 pub struct Khf<R, H, const N: usize> {
-    master_key: Key<N>,
-    master_root: Node<H, N>,
     topology: Topology,
+    master_key: Key<N>,
+    updated_root: Node<H, N>,
     updated: BTreeSet<u64>,
+    appended_root: Node<H, N>,
+    appended: BTreeSet<u64>,
     roots: Vec<Node<H, N>>,
     rng: R,
+}
+
+enum Modification {
+    Update,
+    Append,
 }
 
 impl<R, H, const N: usize> Khf<R, H, N>
@@ -25,6 +32,10 @@ where
             .unwrap_or(0)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn fragmentation(&self) -> u64 {
         self.roots.len() as u64
     }
@@ -35,11 +46,24 @@ where
         key
     }
 
+    fn append_key(&mut self, leaf: u64) -> Key<N> {
+        self.appended.insert(leaf);
+        self.appended_root
+            .derive(&self.topology, self.topology.leaf_position(leaf))
+    }
+
+    fn update_key(&mut self, leaf: u64) -> Key<N> {
+        self.appended.remove(&leaf);
+        self.updated.insert(leaf);
+        self.updated_root
+            .derive(&self.topology, self.topology.leaf_position(leaf))
+    }
+
     fn update_master_key(&mut self) {
         self.master_key = Self::random_key(&mut self.rng);
     }
 
-    fn update_range(&mut self, start: u64, end: u64) {
+    fn patch_range(&mut self, modification: Modification, start: u64, end: u64) {
         let mut roots = Vec::new();
         let mut patch = Vec::new();
 
@@ -57,8 +81,13 @@ where
             ));
         }
 
+        let root = match modification {
+            Modification::Update => &self.updated_root,
+            Modification::Append => &self.appended_root,
+        };
+
         roots.extend(&mut self.roots.drain(..patch_start));
-        patch.append(&mut self.master_root.coverage(&self.topology, start, end));
+        patch.append(&mut root.coverage(&self.topology, start, end));
 
         let mut patch_end = self.roots.len();
         if end < self.topology.end(self.roots[self.roots.len() - 1].pos) {
@@ -84,8 +113,13 @@ where
         self.roots = roots;
     }
 
-    fn updated_ranges(&self) -> Vec<(u64, u64)> {
-        if self.updated.is_empty() {
+    fn patched_ranges(&self, modification: Modification) -> Vec<(u64, u64)> {
+        let set = match modification {
+            Modification::Update => &self.updated,
+            Modification::Append => &self.appended,
+        };
+
+        if set.is_empty() {
             return Vec::new();
         }
 
@@ -95,7 +129,7 @@ where
         let mut prev = 0;
         let mut leaves = 1;
 
-        for leaf in &self.updated {
+        for leaf in set {
             if first {
                 first = false;
                 start = *leaf;
@@ -125,18 +159,22 @@ where
 
     fn setup(mut rng: Self::Init) -> Self {
         Self {
-            master_key: Self::random_key(&mut rng),
-            master_root: Node::new(Self::random_key(&mut rng)),
             topology: Topology::default(),
+            master_key: Self::random_key(&mut rng),
+            updated_root: Node::new(Self::random_key(&mut rng)),
             updated: BTreeSet::new(),
-            roots: Vec::new(),
+            appended_root: Node::new(Self::random_key(&mut rng)),
+            appended: BTreeSet::new(),
+            roots: vec![Node::new(Self::random_key(&mut rng))],
             rng,
         }
     }
 
     fn derive(&mut self, x: Self::Id) -> Self::Key {
-        if self.updated.contains(&x) || x >= self.len() {
-            self.update(x)
+        if self.is_empty() || x >= self.len() {
+            self.append_key(x)
+        } else if self.updated.contains(&x) {
+            self.update_key(x)
         } else {
             let pos = self.topology.leaf_position(x);
             let index = self
@@ -156,16 +194,20 @@ where
     }
 
     fn update(&mut self, x: Self::Id) -> Self::Key {
-        self.updated.insert(x);
-        self.master_root
-            .derive(&self.topology, self.topology.leaf_position(x))
+        self.update_key(x)
     }
 
     fn epoch(&mut self) {
-        for (start, end) in self.updated_ranges() {
-            self.update_range(start, end);
+        for (start, end) in self.patched_ranges(Modification::Update) {
+            self.patch_range(Modification::Update, start, end);
         }
         self.updated.clear();
+
+        for (start, end) in self.patched_ranges(Modification::Append) {
+            self.patch_range(Modification::Append, start, end);
+        }
+        self.appended.clear();
+
         self.update_master_key();
     }
 }
@@ -182,5 +224,44 @@ where
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hasher::prelude::*;
+    use rand::rngs::ThreadRng;
+
+    #[test]
+    fn it_works() {
+        let rng = ThreadRng::default();
+        let mut khf = Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup(rng);
+
+        let k0 = khf.derive(0);
+        let k0_prime = khf.update(0);
+        assert_ne!(k0, k0_prime);
+
+        khf.epoch();
+        println!("{khf}");
+
+        let k0 = khf.derive(0);
+        let k0_prime = khf.update(0);
+        assert_ne!(k0, k0_prime);
+
+        let k1 = khf.derive(1);
+        let k1_prime = khf.update(1);
+        assert_ne!(k1, k1_prime);
+
+        let k2 = khf.derive(2);
+        let k2_prime = khf.update(2);
+        assert_ne!(k2, k2_prime);
+
+        let k3 = khf.derive(3);
+        let k3_prime = khf.update(3);
+        assert_ne!(k3, k3_prime);
+
+        khf.epoch();
+        println!("{khf}");
     }
 }

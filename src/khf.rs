@@ -244,7 +244,7 @@ where
     }
 
     fn compact(&mut self) {
-        todo!()
+        self.roots = vec![Self::random_root(&mut self.rng)];
     }
 
     fn persist<W>(&self, _location: W) -> Result<(), Self::Error>

@@ -29,17 +29,17 @@ where
         self.keys
     }
 
+    /// Returns the number of roots in the forest's root list.
+    pub fn fragmentation(&self) -> u64 {
+        self.roots.len() as u64
+    }
+
     /// Returns `true` if the forest is consolidated.
-    pub fn is_consolidated(&self) -> bool {
+    fn is_consolidated(&self) -> bool {
         self.roots
             .first()
             .filter(|root| root.pos == (0, 0))
             .is_some()
-    }
-
-    /// Returns the number of roots in the forest's root list.
-    pub fn fragmentation(&self) -> u64 {
-        self.roots.len() as u64
     }
 
     /// Returns a key filled with bytes from the supplied PRNG.

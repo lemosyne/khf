@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 hasher = { git = "ssh://git@github.com/lemosyne/hasher.git" }
 hex = "0.4.3"
+itertools = "0.10.5"
 kms = { git = "ssh://git@github.com/lemosyne/kms.git" }
 rand = "0.8.5"
 thiserror = "1.0.40"

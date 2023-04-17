@@ -1,5 +1,6 @@
 use crate::{aliases::Key, node::Node, topology::Topology};
 use hasher::prelude::Hasher;
+use itertools::Itertools;
 use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
 use std::{cmp::Ordering, collections::BTreeSet, fmt};
@@ -122,32 +123,23 @@ where
 
     /// Returns a `Vec` of ranges of updated keys.
     fn updated_ranges(&self) -> Vec<(u64, u64)> {
-        if self.updated_keys.is_empty() {
-            return Vec::new();
-        }
-
-        let mut ranges = Vec::new();
-        let mut first = true;
-        let mut start = 0;
-        let mut prev = 0;
-        let mut leaves = 1;
-
-        for leaf in &self.updated_keys {
-            if first {
-                first = false;
-                start = *leaf;
-            } else if *leaf == prev + 1 {
-                leaves += 1;
-            } else {
-                ranges.push((start, start + leaves));
-                leaves = 1;
-                start = *leaf;
-            }
-            prev = *leaf;
-        }
-
-        ranges.push((start, start + leaves));
-        ranges
+        self.updated_keys
+            .iter()
+            .batching(|it| {
+                it.next().map(|key| {
+                    let start = *key;
+                    let mut curr = start;
+                    let keys = it
+                        .take_while(|key| {
+                            let is_contiguous = curr + 1 == **key;
+                            curr += 1;
+                            is_contiguous
+                        })
+                        .count() as u64;
+                    (start, start + keys + 1)
+                })
+            })
+            .collect()
     }
 
     /// Updates a range of keys using the forest's root for updated keys.

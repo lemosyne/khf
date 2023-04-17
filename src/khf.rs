@@ -4,20 +4,19 @@ use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
 use std::{cmp::Ordering, collections::BTreeSet, fmt};
 
+/// A keyed hash forest (`Khf`) is a data structure for secure key management built around keyed
+/// hash trees (`Kht`s). As a secure key management scheme, a `Khf` is not only capable of deriving
+/// keys, but also updating keys such that they cannot be rederived post-update. Updating a key is
+/// synonymous to revoking a key.
 pub struct Khf<R, H, const N: usize> {
     topology: Topology,
     master_key: Key<N>,
-    updated_root: Node<H, N>,
-    updated: BTreeSet<u64>,
-    appended_root: Node<H, N>,
-    appended: BTreeSet<u64>,
+    updated_key_root: Node<H, N>,
+    appended_key_root: Node<H, N>,
+    updated_keys: BTreeSet<u64>,
     roots: Vec<Node<H, N>>,
+    keys: u64,
     rng: R,
-}
-
-enum Modification {
-    Update,
-    Append,
 }
 
 impl<R, H, const N: usize> Khf<R, H, N>
@@ -25,101 +24,105 @@ where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
+    /// Returns the number of keys supplied by the forest.
     pub fn len(&self) -> u64 {
+        self.keys
+    }
+
+    /// Returns `true` if the forest is consolidated.
+    pub fn is_consolidated(&self) -> bool {
         self.roots
-            .last()
-            .map(|root| self.topology.end(root.pos))
-            .unwrap_or(0)
+            .first()
+            .filter(|root| root.pos == (0, 0))
+            .is_some()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
+    /// Returns the number of roots in the forest's root list.
     pub fn fragmentation(&self) -> u64 {
         self.roots.len() as u64
     }
 
+    /// Returns a key filled with bytes from the supplied PRNG.
     fn random_key(rng: &mut R) -> Key<N> {
         let mut key = [0; N];
         rng.fill_bytes(&mut key);
         key
     }
 
-    fn append_key(&mut self, leaf: u64) -> Key<N> {
-        self.appended.insert(leaf);
-        self.appended_root
-            .derive(&self.topology, self.topology.leaf_position(leaf))
+    /// Returns a root with a pseudorandom key.
+    fn random_root(rng: &mut R) -> Node<H, N> {
+        Node::new(Self::random_key(rng))
     }
 
-    fn update_key(&mut self, leaf: u64) -> Key<N> {
-        self.appended.remove(&leaf);
-        self.updated.insert(leaf);
-        self.updated_root
-            .derive(&self.topology, self.topology.leaf_position(leaf))
+    /// Appends a key, deriving it from the root for appended keys.
+    fn append_key(&mut self, key: u64) -> Key<N> {
+        // No need to append additional roots the forest is already consolidated.
+        if self.is_consolidated() {
+            self.keys = self.keys.max(key);
+            return self.roots[0].derive(&self.topology, self.topology.leaf_position(key));
+        }
+
+        // First, add any roots needed to reach a full L1 root.
+        // For example: assume a topology of [4] and the following roots:
+        //
+        // (2,0) (2,1)
+        //
+        // Then we will need 2 additional roots to reach a full L1.
+        //
+        //          (1,0)
+        //            |
+        //   +-----+--+--+-----+
+        //   |     |     |     |
+        // (2,0) (2,1) (2,2) (2,3)
+        //
+        // Doing this will allow us to append more keys later by simply adding L1 roots.
+        let needed = self.topology.descendants(1) - (self.keys % self.topology.descendants(1));
+        self.roots.append(&mut self.appended_key_root.coverage(
+            &self.topology,
+            self.keys,
+            self.keys + needed,
+        ));
+        self.keys += needed;
+
+        // Add L1 roots until we have one that covers the desired key.
+        while self.keys < key {
+            let pos = (1, self.keys / self.topology.descendants(1));
+            let key = self.appended_key_root.derive(&self.topology, pos);
+            self.roots.push(Node::with_pos(pos, key));
+            self.keys += self.topology.descendants(1);
+        }
+
+        self.derive(key)
     }
 
-    fn update_master_key(&mut self) {
-        self.master_key = Self::random_key(&mut self.rng);
+    /// Updates a key, deriving it from the root for updated keys.
+    fn update_key(&mut self, key: u64) -> Key<N> {
+        self.updated_keys.insert(key);
+        self.updated_key_root
+            .derive(&self.topology, self.topology.leaf_position(key))
     }
 
-    fn patch_range(&mut self, modification: Modification, start: u64, end: u64) {
-        let mut roots = Vec::new();
-        let mut patch = Vec::new();
-
-        let patch_start = self
+    /// Derives a key from an existing root in the root list.
+    fn derive_key(&mut self, key: u64) -> Key<N> {
+        let pos = self.topology.leaf_position(key);
+        let index = self
             .roots
-            .iter()
-            .position(|root| start < self.topology.end(root.pos))
-            .unwrap_or(self.roots.len() - 1);
-        let patch_root = &self.roots[patch_start];
-        if self.topology.start(patch_root.pos) != start {
-            patch.append(&mut patch_root.coverage(
-                &self.topology,
-                self.topology.start(patch_root.pos),
-                start,
-            ));
-        }
-
-        let root = match modification {
-            Modification::Update => &self.updated_root,
-            Modification::Append => &self.appended_root,
-        };
-
-        roots.extend(&mut self.roots.drain(..patch_start));
-        patch.append(&mut root.coverage(&self.topology, start, end));
-
-        let mut patch_end = self.roots.len();
-        if end < self.topology.end(self.roots[self.roots.len() - 1].pos) {
-            patch_end = self
-                .roots
-                .iter()
-                .position(|root| end <= self.topology.end(root.pos))
-                .unwrap_or(self.roots.len())
-                + 1;
-            let patch_root = &self.roots[patch_end - 1];
-            if self.topology.end(patch_root.pos) != end {
-                patch.append(&mut patch_root.coverage(
-                    &self.topology,
-                    end,
-                    self.topology.end(patch_root.pos),
-                ));
-            }
-        }
-
-        roots.append(&mut patch);
-        roots.extend(&mut self.roots.drain(patch_end..));
-
-        self.roots = roots;
+            .binary_search_by(|root| {
+                if self.topology.is_ancestor(root.pos, pos) {
+                    Ordering::Equal
+                } else if self.topology.end(root.pos) <= self.topology.start(pos) {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            })
+            .unwrap();
+        self.roots[index].derive(&self.topology, pos)
     }
 
-    fn patched_ranges(&self, modification: Modification) -> Vec<(u64, u64)> {
-        let set = match modification {
-            Modification::Update => &self.updated,
-            Modification::Append => &self.appended,
-        };
-
-        if set.is_empty() {
+    /// Returns a `Vec` of ranges of updated keys.
+    fn updated_ranges(&self) -> Vec<(u64, u64)> {
+        if self.updated_keys.is_empty() {
             return Vec::new();
         }
 
@@ -129,7 +132,7 @@ where
         let mut prev = 0;
         let mut leaves = 1;
 
-        for leaf in set {
+        for leaf in &self.updated_keys {
             if first {
                 first = false;
                 start = *leaf;
@@ -146,6 +149,55 @@ where
         ranges.push((start, start + leaves));
         ranges
     }
+
+    /// Updates a range of keys using the forest's root for updated keys.
+    fn update_range(&mut self, start: u64, end: u64) {
+        let mut roots = Vec::new();
+        let mut updated = Vec::new();
+
+        // Find the first root affected by the update.
+        let update_start = self
+            .roots
+            .iter()
+            .position(|root| start < self.topology.end(root.pos))
+            .unwrap_or(self.roots.len() - 1);
+        let update_root = &self.roots[update_start];
+        if self.topology.start(update_root.pos) != start {
+            updated.append(&mut update_root.coverage(
+                &self.topology,
+                self.topology.start(update_root.pos),
+                start,
+            ));
+        }
+
+        // Save roots before the first root affected by the update, then add the updated roots.
+        roots.extend(&mut self.roots.drain(..update_start));
+        updated.append(&mut self.updated_key_root.coverage(&self.topology, start, end));
+
+        // Find the last root affected by the update.
+        let mut update_end = self.roots.len();
+        if end < self.topology.end(self.roots[self.roots.len() - 1].pos) {
+            update_end = self
+                .roots
+                .iter()
+                .position(|root| end <= self.topology.end(root.pos))
+                .unwrap_or(self.roots.len())
+                + 1;
+            let update_root = &self.roots[update_end - 1];
+            if self.topology.end(update_root.pos) != end {
+                updated.append(&mut update_root.coverage(
+                    &self.topology,
+                    end,
+                    self.topology.end(update_root.pos),
+                ));
+            }
+        }
+
+        // Save the updated roots, add the remaining roots, and use the new set of roots.
+        roots.append(&mut updated);
+        roots.extend(&mut self.roots.drain(update_end..));
+        self.roots = roots;
+    }
 }
 
 impl<R, H, const N: usize> KeyManagementScheme for Khf<R, H, N>
@@ -153,62 +205,49 @@ where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
-    type Init = R;
+    type Init = (Vec<u64>, R);
     type Key = Key<N>;
     type Id = u64;
 
-    fn setup(mut rng: Self::Init) -> Self {
+    fn setup((fanouts, mut rng): Self::Init) -> Self {
         Self {
-            topology: Topology::default(),
+            topology: Topology::new(&fanouts),
             master_key: Self::random_key(&mut rng),
-            updated_root: Node::new(Self::random_key(&mut rng)),
-            updated: BTreeSet::new(),
-            appended_root: Node::new(Self::random_key(&mut rng)),
-            appended: BTreeSet::new(),
-            roots: vec![Node::new(Self::random_key(&mut rng))],
+            updated_key_root: Self::random_root(&mut rng),
+            appended_key_root: Self::random_root(&mut rng),
+            updated_keys: BTreeSet::new(),
+            roots: vec![Self::random_root(&mut rng)],
+            keys: 0,
             rng,
         }
     }
 
-    fn derive(&mut self, x: Self::Id) -> Self::Key {
-        if self.is_empty() || x >= self.len() {
-            self.append_key(x)
-        } else if self.updated.contains(&x) {
-            self.update_key(x)
+    fn derive(&mut self, key: Self::Id) -> Self::Key {
+        // Three cases for any key derivation:
+        //  1) The key has been updated
+        //  2) The key needs to be appended
+        //  3) The key already exists in the root list
+        if self.updated_keys.contains(&key) {
+            self.update_key(key)
+        } else if key >= self.len() {
+            self.append_key(key)
         } else {
-            let pos = self.topology.leaf_position(x);
-            let index = self
-                .roots
-                .binary_search_by(|root| {
-                    if self.topology.is_ancestor(root.pos, pos) {
-                        Ordering::Equal
-                    } else if self.topology.end(root.pos) <= self.topology.start(pos) {
-                        Ordering::Less
-                    } else {
-                        Ordering::Greater
-                    }
-                })
-                .unwrap();
-            self.roots[index].derive(&self.topology, pos)
+            self.derive_key(key)
         }
     }
 
-    fn update(&mut self, x: Self::Id) -> Self::Key {
-        self.update_key(x)
+    fn update(&mut self, key: Self::Id) -> Self::Key {
+        self.update_key(key)
     }
 
     fn epoch(&mut self) {
-        for (start, end) in self.patched_ranges(Modification::Update) {
-            self.patch_range(Modification::Update, start, end);
+        for (start, end) in self.updated_ranges() {
+            self.update_range(start, end);
         }
-        self.updated.clear();
-
-        for (start, end) in self.patched_ranges(Modification::Append) {
-            self.patch_range(Modification::Append, start, end);
-        }
-        self.appended.clear();
-
-        self.update_master_key();
+        self.master_key = Self::random_key(&mut self.rng);
+        self.updated_key_root = Self::random_root(&mut self.rng);
+        self.appended_key_root = Self::random_root(&mut self.rng);
+        self.updated_keys.clear();
     }
 }
 
@@ -236,7 +275,8 @@ mod tests {
     #[test]
     fn it_works() {
         let rng = ThreadRng::default();
-        let mut khf = Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup(rng);
+        let fanouts = vec![2, 2];
+        let mut khf = Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((fanouts, rng));
 
         let k0 = khf.derive(0);
         let k0_prime = khf.update(0);

@@ -23,6 +23,14 @@ where
         }
     }
 
+    pub fn with_pos(pos: Pos, key: Key<N>) -> Self {
+        Self {
+            pos,
+            key,
+            phantoms: PhantomData,
+        }
+    }
+
     pub fn derive(&self, topology: &Topology, pos: Pos) -> Key<N> {
         if self.pos == pos {
             self.key

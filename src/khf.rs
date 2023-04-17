@@ -148,6 +148,7 @@ where
             self.roots = self.roots[0].coverage(&self.topology, 0, self.keys + 1);
         }
 
+        // We need to create a new set of roots and store updated roots.
         let mut roots = Vec::new();
         let mut updated = Vec::new();
 

@@ -225,6 +225,10 @@ where
     }
 
     fn update(&mut self, key: Self::Id) -> Self::Key {
+        // Append keys if we don't cover the key yet.
+        if key >= self.len() {
+            self.append_key(key);
+        }
         self.update_key(key)
     }
 

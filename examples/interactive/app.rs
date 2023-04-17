@@ -55,16 +55,19 @@ where
                                 write!(command, " [{}]", hex::encode(self.forest.derive(key)))?;
                             }
                             Command::Update(key) => {
-                                self.forest.update(key);
+                                write!(command, " [{}]", hex::encode(self.forest.update(key)))?;
                             }
                             Command::Compact => {
                                 self.forest.compact();
+                            }
+                            Command::Commit => {
+                                self.forest.commit();
                             }
                             Command::Clear => {
                                 self.history.clear();
                                 continue;
                             }
-                            _ => {}
+                            Command::Invalid => {}
                         }
                         self.history.push(command);
                     }
@@ -141,7 +144,7 @@ where
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .title("Forest"),
+                    .title(format!(" Forest ({} keys) ", self.forest.len())),
             )
             .alignment(Alignment::Center)
             .scroll((self.scroll, 0));
@@ -165,7 +168,7 @@ where
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .title("Command"),
+                    .title(" Command "),
             );
         f.render_widget(command, area);
 
@@ -187,7 +190,7 @@ where
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title("History"),
+                .title(" History "),
         );
         f.render_widget(history, area);
     }

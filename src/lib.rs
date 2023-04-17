@@ -6,7 +6,7 @@ mod error;
 pub use error::Error;
 
 mod khf;
-pub use khf::Khf;
+pub use crate::khf::Khf;
 
 mod kht;
-pub use kht::Kht;
+pub use crate::kht::Kht;

@@ -63,12 +63,12 @@ fn compact_cmd(input: &str) -> IResult<&str, Command> {
 
 fn commit_cmd(input: &str) -> IResult<&str, Command> {
     map(delimited(multispace0, tag("commit"), multispace0), |_| {
-        Command::Compact
+        Command::Commit
     })(input)
 }
 
 fn clear_cmd(input: &str) -> IResult<&str, Command> {
     map(delimited(multispace0, tag("clear"), multispace0), |_| {
-        Command::Compact
+        Command::Clear
     })(input)
 }

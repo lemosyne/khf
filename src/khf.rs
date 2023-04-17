@@ -37,10 +37,7 @@ where
 
     /// Returns `true` if the forest is consolidated.
     fn is_consolidated(&self) -> bool {
-        self.roots
-            .first()
-            .filter(|root| root.pos == (0, 0))
-            .is_some()
+        self.roots.len() == 1 && self.roots[0].pos == (0, 0)
     }
 
     /// Returns a key filled with bytes from the supplied PRNG.
@@ -125,21 +122,32 @@ where
     fn updated_ranges(&self) -> Vec<(u64, u64)> {
         self.updated_keys
             .iter()
-            .batching(|it| {
-                it.next().map(|key| {
+            .peekable()
+            .batching(|it| match it.peek() {
+                Some(&key) => {
                     let num_keys = it
                         .enumerate()
                         .map(|(i, nkey)| (i as u64, nkey))
-                        .take_while(|(i, nkey)| key + *i + 1 == **nkey)
+                        .peekable()
+                        .peeking_take_while(|(i, nkey)| key + *i + 1 == **nkey)
                         .count() as u64;
-                    (*key, key + num_keys + 1)
-                })
+                    Some((*key, key + num_keys + 1))
+                }
+                None => None,
             })
             .collect()
     }
 
     /// Updates a range of keys using the forest's root for updated keys.
     fn update_range(&mut self, start: u64, end: u64) {
+        // Updates cause consolidated forests to fragment.
+        if self.is_consolidated() {
+            if self.keys == 0 {
+                self.keys = end;
+            }
+            self.roots = self.roots[0].coverage(&self.topology, 0, self.keys + 1);
+        }
+
         let mut roots = Vec::new();
         let mut updated = Vec::new();
 
@@ -181,10 +189,13 @@ where
             }
         }
 
-        // Save the updated roots, add the remaining roots, and use the new set of roots.
+        // Save the updated roots and add any remaining roots.
         roots.append(&mut updated);
         roots.extend(&mut self.roots.drain(update_end..));
+
+        // Update roots and number of keys.
         self.roots = roots;
+        self.keys = self.topology.end(self.roots.last().unwrap().pos);
     }
 }
 
@@ -296,30 +307,41 @@ mod tests {
         let fanouts = vec![2, 2];
         let mut khf = Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((fanouts, rng));
 
-        let k0 = khf.derive(0);
-        let k0_prime = khf.update(0);
-        assert_ne!(k0, k0_prime);
+        let t1_keys = khf
+            .derive_many([0, 5, 7])
+            .into_iter()
+            .map(|key| hex::encode(key))
+            .collect_vec();
+
+        let t2_keys = khf
+            .update_many([0, 5, 7])
+            .into_iter()
+            .map(|key| hex::encode(key))
+            .collect_vec();
 
         khf.commit();
-        println!("{khf}");
 
-        let k0 = khf.derive(0);
-        let k0_prime = khf.update(0);
-        assert_ne!(k0, k0_prime);
+        let k1 = khf.derive(9);
 
-        let k1 = khf.derive(1);
-        let k1_prime = khf.update(1);
-        assert_ne!(k1, k1_prime);
+        let t3_keys = khf
+            .derive_many([0, 5, 7])
+            .into_iter()
+            .map(|key| hex::encode(key))
+            .collect_vec();
 
-        let k2 = khf.derive(2);
-        let k2_prime = khf.update(2);
-        assert_ne!(k2, k2_prime);
-
-        let k3 = khf.derive(3);
-        let k3_prime = khf.update(3);
-        assert_ne!(k3, k3_prime);
+        let t4_keys = khf
+            .update_many([0, 5, 7])
+            .into_iter()
+            .map(|key| hex::encode(key))
+            .collect_vec();
 
         khf.commit();
-        println!("{khf}");
+
+        let k2 = khf.derive(9);
+
+        assert_ne!(t1_keys, t2_keys);
+        assert_eq!(t2_keys, t3_keys);
+        assert_ne!(t3_keys, t4_keys);
+        assert_eq!(k1, k2);
     }
 }

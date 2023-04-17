@@ -1,6 +1,6 @@
-pub mod aliases;
+pub(crate) mod aliases;
 pub mod error;
 pub mod khf;
 pub mod kht;
-pub mod node;
-pub mod topology;
+pub(crate) mod node;
+pub(crate) mod topology;

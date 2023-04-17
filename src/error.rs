@@ -6,6 +6,6 @@ pub enum Error {
     #[error(transparent)]
     IO(#[from] io::Error),
 
-    #[error("unknown data store error")]
+    #[error("unknown error")]
     Unknown,
 }

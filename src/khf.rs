@@ -1,7 +1,7 @@
-use crate::{aliases::Key, node::Node, topology::Topology};
+use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
 use hasher::prelude::Hasher;
 use itertools::Itertools;
-use kms::KeyManagementScheme;
+use kms::{FineGrainedKeyManagementScheme, KeyManagementScheme, SecureKeyManagementScheme};
 use rand::{CryptoRng, RngCore};
 use std::{cmp::Ordering, collections::BTreeSet, fmt};
 
@@ -195,7 +195,8 @@ where
 {
     type Init = (Vec<u64>, R);
     type Key = Key<N>;
-    type Id = u64;
+    type KeyId = u64;
+    type Error = Error;
 
     fn setup((fanouts, mut rng): Self::Init) -> Self {
         Self {
@@ -210,7 +211,7 @@ where
         }
     }
 
-    fn derive(&mut self, key: Self::Id) -> Self::Key {
+    fn derive(&mut self, key: Self::KeyId) -> Self::Key {
         // Three cases for any key derivation:
         //  1) The key has been updated
         //  2) The key needs to be appended
@@ -224,7 +225,7 @@ where
         }
     }
 
-    fn update(&mut self, key: Self::Id) -> Self::Key {
+    fn update(&mut self, key: Self::KeyId) -> Self::Key {
         // Append keys if we don't cover the key yet.
         if key >= self.len() {
             self.append_key(key);
@@ -232,8 +233,8 @@ where
         self.update_key(key)
     }
 
-    fn epoch(&mut self) {
-        for (start, end) in dbg!(self.updated_ranges()) {
+    fn commit(&mut self) {
+        for (start, end) in self.updated_ranges() {
             self.update_range(start, end);
         }
         self.master_key = Self::random_key(&mut self.rng);
@@ -241,6 +242,31 @@ where
         self.appended_key_root = Self::random_root(&mut self.rng);
         self.updated_keys.clear();
     }
+
+    fn compact(&mut self) {
+        todo!()
+    }
+
+    fn persist<W>(&self, _location: W) -> Result<(), Self::Error>
+    where
+        W: std::io::Write,
+    {
+        todo!()
+    }
+}
+
+impl<R, H, const N: usize> SecureKeyManagementScheme for Khf<R, H, N>
+where
+    R: RngCore + CryptoRng,
+    H: Hasher<N>,
+{
+}
+
+impl<R, H, const N: usize> FineGrainedKeyManagementScheme for Khf<R, H, N>
+where
+    R: RngCore + CryptoRng,
+    H: Hasher<N>,
+{
 }
 
 impl<R, H, const N: usize> fmt::Display for Khf<R, H, N>
@@ -274,7 +300,7 @@ mod tests {
         let k0_prime = khf.update(0);
         assert_ne!(k0, k0_prime);
 
-        khf.epoch();
+        khf.commit();
         println!("{khf}");
 
         let k0 = khf.derive(0);
@@ -293,7 +319,7 @@ mod tests {
         let k3_prime = khf.update(3);
         assert_ne!(k3, k3_prime);
 
-        khf.epoch();
+        khf.commit();
         println!("{khf}");
     }
 }

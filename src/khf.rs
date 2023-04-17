@@ -127,16 +127,12 @@ where
             .iter()
             .batching(|it| {
                 it.next().map(|key| {
-                    let start = *key;
-                    let mut curr = start;
-                    let keys = it
-                        .take_while(|key| {
-                            let is_contiguous = curr + 1 == **key;
-                            curr += 1;
-                            is_contiguous
-                        })
+                    let num_keys = it
+                        .enumerate()
+                        .map(|(i, nkey)| (i as u64, nkey))
+                        .take_while(|(i, nkey)| key + *i + 1 == **nkey)
                         .count() as u64;
-                    (start, start + keys + 1)
+                    (*key, key + num_keys + 1)
                 })
             })
             .collect()
@@ -233,7 +229,7 @@ where
     }
 
     fn epoch(&mut self) {
-        for (start, end) in self.updated_ranges() {
+        for (start, end) in dbg!(self.updated_ranges()) {
             self.update_range(start, end);
         }
         self.master_key = Self::random_key(&mut self.rng);

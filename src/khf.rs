@@ -19,7 +19,7 @@ pub struct Khf<C, R, H, const N: usize> {
     master_key: Key<N>,
     // The public state of a `Khf`.
     state: KhfState<H, N>,
-    // The PRNG used to generate random keys and roots.
+    // The CSPRNG used to generate random keys and roots.
     rng: R,
     // Pretend like we own a `C` (which will be some crypter).
     phantom: PhantomData<C>,
@@ -52,7 +52,7 @@ where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
-    /// Returns a key filled with bytes from the supplied PRNG.
+    /// Returns a key filled with bytes from the supplied CSPRNG.
     fn random_key(rng: &mut R) -> Key<N> {
         let mut key = [0; N];
         rng.fill_bytes(&mut key);
@@ -233,10 +233,19 @@ where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
+    /// A `Khf` is initialized with a fanout list and CSPRNG.
     type Init = (Vec<u64>, R);
+    /// Keys have the same size as the hash digest size.
     type Key = Key<N>;
+    /// Keys are uniquely identified with `u64`s.
     type KeyId = u64;
+    /// Bespoke error type.
     type Error = Error;
+    /// Allow public state to be encrypted by external keys.
+    /// This is useful in a hierarchical use of `Khf`s.
+    type PublicMetadata = Option<Key<N>>;
+    /// No additional metadata needed when persisting/loading private state.
+    type PrivateMetadata = ();
 
     fn setup((fanouts, mut rng): Self::Init) -> Self {
         Self {
@@ -290,17 +299,32 @@ where
         self.state.roots = vec![Self::random_root(&mut self.rng)];
     }
 
-    fn persist_public_state<L>(&self, loc: &mut L) -> Result<(), Self::Error>
+    fn persist_public_state<L>(
+        &self,
+        loc: &mut L,
+        meta: Self::PublicMetadata,
+    ) -> Result<(), Self::Error>
     where
         L: std::io::Write,
     {
         let plaintext = bincode::serialize(&self.state)?;
-        let ciphertext = C::onetime_encrypt(&self.master_key, &plaintext)?;
+
+        let ciphertext = if let Some(key) = meta {
+            C::onetime_encrypt(&key, &plaintext)?
+        } else {
+            C::onetime_encrypt(&self.master_key, &plaintext)?
+        };
+
         loc.write_all(&ciphertext)?;
+
         Ok(())
     }
 
-    fn persist_private_state<L>(&self, loc: &mut L) -> Result<(), Self::Error>
+    fn persist_private_state<L>(
+        &self,
+        loc: &mut L,
+        _meta: Self::PrivateMetadata,
+    ) -> Result<(), Self::Error>
     where
         L: std::io::Write,
     {
@@ -308,18 +332,33 @@ where
         Ok(())
     }
 
-    fn load_public_state<L>(&mut self, loc: &mut L) -> Result<(), Self::Error>
+    fn load_public_state<L>(
+        &mut self,
+        loc: &mut L,
+        meta: Self::PublicMetadata,
+    ) -> Result<(), Self::Error>
     where
         L: std::io::Read,
     {
         let mut ciphertext = Vec::new();
         loc.read_to_end(&mut ciphertext)?;
-        let plaintext = C::onetime_decrypt(&self.master_key, &ciphertext)?;
+
+        let plaintext = if let Some(key) = meta {
+            C::onetime_decrypt(&key, &ciphertext)?
+        } else {
+            C::onetime_decrypt(&self.master_key, &ciphertext)?
+        };
+
         self.state = bincode::deserialize(&plaintext)?;
+
         Ok(())
     }
 
-    fn load_private_state<L>(&mut self, loc: &mut L) -> Result<(), Self::Error>
+    fn load_private_state<L>(
+        &mut self,
+        loc: &mut L,
+        _meta: Self::PrivateMetadata,
+    ) -> Result<(), Self::Error>
     where
         L: std::io::Read,
     {

@@ -3,10 +3,15 @@ use crate::{
     topology::Topology,
 };
 use hasher::prelude::*;
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use std::{fmt, marker::PhantomData};
 
+#[serde_as]
+#[derive(Serialize, Deserialize)]
 pub struct Node<H, const N: usize> {
     pub pos: Pos,
+    #[serde_as(as = "[_; N]")]
     pub key: Key<N>,
     phantoms: PhantomData<H>,
 }

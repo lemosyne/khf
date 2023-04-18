@@ -1,7 +1,8 @@
 use crate::command::Command;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use hasher::prelude::*;
+use crypter::Crypter;
+use hasher::Hasher;
 use khf::Khf;
 use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
@@ -16,19 +17,20 @@ use tui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-pub struct App<R, H, const N: usize> {
+pub struct App<C, R, H, const N: usize> {
     command: String,
     history: Vec<String>,
-    forest: Khf<R, H, N>,
+    forest: Khf<C, R, H, N>,
     scroll: u16,
 }
 
-impl<R, H, const N: usize> App<R, H, N>
+impl<C, R, H, const N: usize> App<C, R, H, N>
 where
+    C: Crypter,
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
-    pub fn new(forest: Khf<R, H, N>) -> Self {
+    pub fn new(forest: Khf<C, R, H, N>) -> Self {
         Self {
             command: " $ ".into(),
             history: Vec::new(),
@@ -144,7 +146,7 @@ where
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .title(format!(" Forest ({} keys) ", self.forest.len())),
+                    .title(" Forest "),
             )
             .alignment(Alignment::Center)
             .scroll((self.scroll, 0));

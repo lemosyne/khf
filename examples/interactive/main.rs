@@ -5,6 +5,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use crypter::prelude::*;
 use hasher::prelude::*;
 use khf::Khf;
 use kms::KeyManagementScheme;
@@ -27,7 +28,7 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let forest = Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((
+    let forest = Khf::<Aes256Ctr, ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((
         args.fanouts.clone(),
         ThreadRng::default(),
     ));

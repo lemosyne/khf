@@ -1,45 +1,57 @@
 use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
-use hasher::prelude::Hasher;
+use crypter::Crypter;
+use hasher::Hasher;
 use itertools::Itertools;
-use kms::{FineGrainedKeyManagementScheme, KeyManagementScheme, SecureKeyManagementScheme};
+use kms::{
+    DeferredKeyManagementScheme, FineGrainedKeyManagementScheme, KeyManagementScheme,
+    SecureKeyManagementScheme,
+};
 use rand::{CryptoRng, RngCore};
-use std::{cmp::Ordering, collections::BTreeSet, fmt};
+use serde::{Deserialize, Serialize};
+use std::{cmp::Ordering, collections::BTreeSet, fmt, marker::PhantomData};
 
 /// A keyed hash forest (`Khf`) is a data structure for secure key management built around keyed
 /// hash trees (`Kht`s). As a secure key management scheme, a `Khf` is not only capable of deriving
 /// keys, but also updating keys such that they cannot be rederived post-update. Updating a key is
 /// synonymous to revoking a key.
-pub struct Khf<R, H, const N: usize> {
-    topology: Topology,
+pub struct Khf<C, R, H, const N: usize> {
+    // The key protecting the public state of a persisted `Khf`.
     master_key: Key<N>,
-    updated_key_root: Node<H, N>,
-    appended_key_root: Node<H, N>,
-    updated_keys: BTreeSet<u64>,
-    roots: Vec<Node<H, N>>,
-    keys: u64,
+    // The public state of a `Khf`.
+    state: KhfState<H, N>,
+    // The PRNG used to generate random keys and roots.
     rng: R,
+    // Pretend like we own a `C` (which will be some crypter).
+    phantom: PhantomData<C>,
 }
 
-impl<R, H, const N: usize> Khf<R, H, N>
+#[derive(Deserialize, Serialize)]
+struct KhfState<H, const N: usize> {
+    // The topology of a `Khf`.
+    topology: Topology,
+    // The root that updated keys are derived from.
+    #[serde(bound(serialize = "Node<H, N>: Serialize"))]
+    #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
+    updated_key_root: Node<H, N>,
+    // The root that appended keys are derived from.
+    #[serde(bound(serialize = "Node<H, N>: Serialize"))]
+    #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
+    appended_key_root: Node<H, N>,
+    // Tracks updated keys.
+    updated_keys: BTreeSet<u64>,
+    // The list of roots.
+    #[serde(bound(serialize = "Node<H, N>: Serialize"))]
+    #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
+    roots: Vec<Node<H, N>>,
+    // The number of keys a `Khf` currently provides.
+    keys: u64,
+}
+
+impl<C, R, H, const N: usize> Khf<C, R, H, N>
 where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
-    /// Returns the number of keys supplied by the forest.
-    pub fn len(&self) -> u64 {
-        self.keys
-    }
-
-    /// Returns the number of roots in the forest's root list.
-    pub fn fragmentation(&self) -> u64 {
-        self.roots.len() as u64
-    }
-
-    /// Returns `true` if the forest is consolidated.
-    fn is_consolidated(&self) -> bool {
-        self.roots.len() == 1 && self.roots[0].pos == (0, 0)
-    }
-
     /// Returns a key filled with bytes from the supplied PRNG.
     fn random_key(rng: &mut R) -> Key<N> {
         let mut key = [0; N];
@@ -50,6 +62,21 @@ where
     /// Returns a root with a pseudorandom key.
     fn random_root(rng: &mut R) -> Node<H, N> {
         Node::new(Self::random_key(rng))
+    }
+
+    /// Returns the number of roots in the forest's root list.
+    pub fn fragmentation(&self) -> u64 {
+        self.state.roots.len() as u64
+    }
+}
+
+impl<H, const N: usize> KhfState<H, N>
+where
+    H: Hasher<N>,
+{
+    /// Returns `true` if the forest is consolidated.
+    fn is_consolidated(&self) -> bool {
+        self.roots.len() == 1 && self.roots[0].pos == (0, 0)
     }
 
     /// Appends a key, deriving it from the root for appended keys.
@@ -90,7 +117,7 @@ where
             self.keys += self.topology.descendants(1);
         }
 
-        self.derive(key)
+        self.derive_key(key)
     }
 
     /// Updates a key, deriving it from the root for updated keys.
@@ -200,8 +227,9 @@ where
     }
 }
 
-impl<R, H, const N: usize> KeyManagementScheme for Khf<R, H, N>
+impl<C, R, H, const N: usize> KeyManagementScheme for Khf<C, R, H, N>
 where
+    C: Crypter,
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
@@ -212,14 +240,17 @@ where
 
     fn setup((fanouts, mut rng): Self::Init) -> Self {
         Self {
-            topology: Topology::new(&fanouts),
             master_key: Self::random_key(&mut rng),
-            updated_key_root: Self::random_root(&mut rng),
-            appended_key_root: Self::random_root(&mut rng),
-            updated_keys: BTreeSet::new(),
-            roots: vec![Self::random_root(&mut rng)],
-            keys: 0,
+            state: KhfState {
+                topology: Topology::new(&fanouts),
+                updated_key_root: Self::random_root(&mut rng),
+                appended_key_root: Self::random_root(&mut rng),
+                updated_keys: BTreeSet::new(),
+                roots: vec![Self::random_root(&mut rng)],
+                keys: 0,
+            },
             rng,
+            phantom: PhantomData,
         }
     }
 
@@ -228,67 +259,107 @@ where
         //  1) The key has been updated
         //  2) The key needs to be appended
         //  3) The key already exists in the root list
-        if self.updated_keys.contains(&key) {
-            self.update_key(key)
-        } else if key >= self.len() {
-            self.append_key(key)
+        if self.state.updated_keys.contains(&key) {
+            self.state.update_key(key)
+        } else if key >= self.state.keys {
+            self.state.append_key(key)
         } else {
-            self.derive_key(key)
+            self.state.derive_key(key)
         }
     }
 
     fn update(&mut self, key: Self::KeyId) -> Self::Key {
         // Append keys if we don't cover the key yet.
-        if key >= self.len() {
-            self.append_key(key);
+        if key >= self.state.keys {
+            self.state.append_key(key);
         }
-        self.update_key(key)
+        self.state.update_key(key)
     }
 
     fn commit(&mut self) {
-        for (start, end) in self.updated_ranges() {
-            self.update_range(start, end);
+        for (start, end) in self.state.updated_ranges() {
+            self.state.update_range(start, end);
         }
         self.master_key = Self::random_key(&mut self.rng);
-        self.updated_key_root = Self::random_root(&mut self.rng);
-        self.appended_key_root = Self::random_root(&mut self.rng);
-        self.updated_keys.clear();
+        self.state.updated_key_root = Self::random_root(&mut self.rng);
+        self.state.appended_key_root = Self::random_root(&mut self.rng);
+        self.state.updated_keys.clear();
     }
 
     fn compact(&mut self) {
-        self.roots = vec![Self::random_root(&mut self.rng)];
+        self.state.roots = vec![Self::random_root(&mut self.rng)];
     }
 
-    fn persist<W>(&self, _location: W) -> Result<(), Self::Error>
+    fn persist_public_state<L>(&self, loc: &mut L) -> Result<(), Self::Error>
     where
-        W: std::io::Write,
+        L: std::io::Write,
     {
-        todo!()
+        let plaintext = bincode::serialize(&self.state)?;
+        let ciphertext = C::onetime_encrypt(&self.master_key, &plaintext)?;
+        loc.write_all(&ciphertext)?;
+        Ok(())
+    }
+
+    fn persist_private_state<L>(&self, loc: &mut L) -> Result<(), Self::Error>
+    where
+        L: std::io::Write,
+    {
+        loc.write_all(&self.master_key)?;
+        Ok(())
+    }
+
+    fn load_public_state<L>(&mut self, loc: &mut L) -> Result<(), Self::Error>
+    where
+        L: std::io::Read,
+    {
+        let mut ciphertext = Vec::new();
+        loc.read_to_end(&mut ciphertext)?;
+        let plaintext = C::onetime_decrypt(&self.master_key, &ciphertext)?;
+        self.state = bincode::deserialize(&plaintext)?;
+        Ok(())
+    }
+
+    fn load_private_state<L>(&mut self, loc: &mut L) -> Result<(), Self::Error>
+    where
+        L: std::io::Read,
+    {
+        loc.read_exact(&mut self.master_key)?;
+        Ok(())
     }
 }
 
-impl<R, H, const N: usize> SecureKeyManagementScheme for Khf<R, H, N>
+impl<C, R, H, const N: usize> SecureKeyManagementScheme for Khf<C, R, H, N>
 where
+    C: Crypter,
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
 }
 
-impl<R, H, const N: usize> FineGrainedKeyManagementScheme for Khf<R, H, N>
+impl<C, R, H, const N: usize> FineGrainedKeyManagementScheme for Khf<C, R, H, N>
 where
+    C: Crypter,
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
 }
 
-impl<R, H, const N: usize> fmt::Display for Khf<R, H, N>
+impl<C, R, H, const N: usize> DeferredKeyManagementScheme for Khf<C, R, H, N>
+where
+    C: Crypter,
+    R: RngCore + CryptoRng,
+    H: Hasher<N>,
+{
+}
+
+impl<C, R, H, const N: usize> fmt::Display for Khf<C, R, H, N>
 where
     H: Hasher<N>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, root) in self.roots.iter().enumerate() {
-            root.fmt(f, &self.topology)?;
-            if i + 1 != self.roots.len() {
+        for (i, root) in self.state.roots.iter().enumerate() {
+            root.fmt(f, &self.state.topology)?;
+            if i + 1 != self.state.roots.len() {
                 writeln!(f)?;
             }
         }
@@ -299,6 +370,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crypter::prelude::*;
     use hasher::prelude::*;
     use rand::rngs::ThreadRng;
 
@@ -306,7 +378,8 @@ mod tests {
     fn it_works() {
         let rng = ThreadRng::default();
         let fanouts = vec![2, 2];
-        let mut khf = Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((fanouts, rng));
+        let mut khf =
+            Khf::<Aes256Ctr, ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((fanouts, rng));
 
         let t1_keys = khf
             .derive_many([0, 5, 7])

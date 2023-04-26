@@ -29,9 +29,11 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let forest = Khf::<Aes256Ctr, ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((
+        None,
+        "/tmp/interactive.khf".into(),
         args.fanouts.clone(),
         ThreadRng::default(),
-    ));
+    ))?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();

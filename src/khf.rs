@@ -8,7 +8,16 @@ use kms::{
 };
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, collections::BTreeSet, fmt, marker::PhantomData};
+use std::{
+    cmp::Ordering,
+    collections::BTreeSet,
+    fmt,
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    marker::PhantomData,
+    os::unix::prelude::FileExt,
+    path::PathBuf,
+};
 
 /// A keyed hash forest (`Khf`) is a data structure for secure key management built around keyed
 /// hash trees (`Kht`s). As a secure key management scheme, a `Khf` is not only capable of deriving
@@ -17,8 +26,12 @@ use std::{cmp::Ordering, collections::BTreeSet, fmt, marker::PhantomData};
 pub struct Khf<C, R, H, const N: usize> {
     // The key protecting the public state of a persisted `Khf`.
     master_key: Key<N>,
+    /// The file the master key is persisted to.
+    master_key_file: Option<File>,
     // The public state of a `Khf`.
     state: KhfState<H, N>,
+    // The file public state is persisted to.
+    state_file: File,
     // The CSPRNG used to generate random keys and roots.
     rng: R,
     // Pretend like we own a `C` (which will be some crypter).
@@ -227,14 +240,14 @@ where
     }
 }
 
-impl<C, R, H, const N: usize> KeyManagementScheme for Khf<C, R, H, N>
+impl<'a, 'b, C, R, H, const N: usize> KeyManagementScheme for Khf<C, R, H, N>
 where
     C: Crypter,
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
     /// A `Khf` is initialized with a fanout list and CSPRNG.
-    type Init = (Vec<u64>, R);
+    type Init = (Option<PathBuf>, PathBuf, Vec<u64>, R);
     /// Keys have the same size as the hash digest size.
     type Key = Key<N>;
     /// Keys are uniquely identified with `u64`s.
@@ -243,13 +256,26 @@ where
     type Error = Error;
     /// Allow public state to be encrypted by external keys.
     /// This is useful in a hierarchical use of `Khf`s.
-    type PublicMetadata = Option<Key<N>>;
+    type PublicParams = Option<Key<N>>;
     /// No additional metadata needed when persisting/loading private state.
-    type PrivateMetadata = ();
+    type PrivateParams = ();
 
-    fn setup((fanouts, mut rng): Self::Init) -> Self {
-        Self {
+    fn setup(
+        (master_key_file, state_file, fanouts, mut rng): Self::Init,
+    ) -> Result<Self, Self::Error> {
+        Ok(Self {
             master_key: Self::random_key(&mut rng),
+            master_key_file: if let Some(file) = master_key_file {
+                Some(
+                    File::options()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(file)?,
+                )
+            } else {
+                None
+            },
             state: KhfState {
                 topology: Topology::new(&fanouts),
                 updated_key_root: Self::random_root(&mut rng),
@@ -258,16 +284,21 @@ where
                 roots: vec![Self::random_root(&mut rng)],
                 keys: 0,
             },
+            state_file: File::options()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(state_file)?,
             rng,
             phantom: PhantomData,
-        }
+        })
     }
 
     fn derive(&mut self, key: Self::KeyId) -> Self::Key {
         // Three cases for any key derivation:
-        //  1) The key has been updated
-        //  2) The key needs to be appended
-        //  3) The key already exists in the root list
+        //  1) The key has been updated.
+        //  2) The key needs to be appended.
+        //  3) The key already exists in the root list.
         if self.state.updated_keys.contains(&key) {
             self.state.update_key(key)
         } else if key >= self.state.keys {
@@ -299,51 +330,36 @@ where
         self.state.roots = vec![Self::random_root(&mut self.rng)];
     }
 
-    fn persist_public_state<L>(
-        &self,
-        loc: &mut L,
-        meta: Self::PublicMetadata,
-    ) -> Result<(), Self::Error>
-    where
-        L: std::io::Write,
-    {
+    fn persist_public_state(&mut self, key: Self::PublicParams) -> Result<(), Self::Error> {
         let plaintext = bincode::serialize(&self.state)?;
 
-        let ciphertext = if let Some(key) = meta {
+        let ciphertext = if let Some(key) = key {
             C::onetime_encrypt(&key, &plaintext)?
         } else {
             C::onetime_encrypt(&self.master_key, &plaintext)?
         };
 
-        loc.write_all(&ciphertext)?;
+        self.state_file.set_len(0)?;
+        self.state_file.write_all_at(&ciphertext, 0)?;
 
         Ok(())
     }
 
-    fn persist_private_state<L>(
-        &self,
-        loc: &mut L,
-        _meta: Self::PrivateMetadata,
-    ) -> Result<(), Self::Error>
-    where
-        L: std::io::Write,
-    {
-        loc.write_all(&self.master_key)?;
+    fn persist_private_state(&mut self, _: Self::PrivateParams) -> Result<(), Self::Error> {
+        if let Some(ref mut master_key_file) = self.master_key_file {
+            master_key_file.set_len(0)?;
+            master_key_file.write_all_at(&self.master_key, 0)?;
+        }
         Ok(())
     }
 
-    fn load_public_state<L>(
-        &mut self,
-        loc: &mut L,
-        meta: Self::PublicMetadata,
-    ) -> Result<(), Self::Error>
-    where
-        L: std::io::Read,
-    {
+    fn load_public_state(&mut self, key: Self::PublicParams) -> Result<(), Self::Error> {
         let mut ciphertext = Vec::new();
-        loc.read_to_end(&mut ciphertext)?;
 
-        let plaintext = if let Some(key) = meta {
+        self.state_file.seek(SeekFrom::Start(0))?;
+        self.state_file.read_to_end(&mut ciphertext)?;
+
+        let plaintext = if let Some(key) = key {
             C::onetime_decrypt(&key, &ciphertext)?
         } else {
             C::onetime_decrypt(&self.master_key, &ciphertext)?
@@ -354,15 +370,11 @@ where
         Ok(())
     }
 
-    fn load_private_state<L>(
-        &mut self,
-        loc: &mut L,
-        _meta: Self::PrivateMetadata,
-    ) -> Result<(), Self::Error>
-    where
-        L: std::io::Read,
-    {
-        loc.read_exact(&mut self.master_key)?;
+    fn load_private_state(&mut self, _: Self::PrivateParams) -> Result<(), Self::Error> {
+        if let Some(ref mut master_key_file) = self.master_key_file {
+            master_key_file.seek(SeekFrom::Start(0))?;
+            master_key_file.read_exact(&mut self.master_key)?;
+        }
         Ok(())
     }
 }
@@ -409,16 +421,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use crypter::prelude::*;
     use hasher::prelude::*;
     use rand::rngs::ThreadRng;
 
     #[test]
-    fn it_works() {
+    fn it_works() -> Result<()> {
         let rng = ThreadRng::default();
         let fanouts = vec![2, 2];
-        let mut khf =
-            Khf::<Aes256Ctr, ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((fanouts, rng));
+        let mut khf = Khf::<Aes256Ctr, ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((
+            None,
+            "/tmp/0.khf".into(),
+            fanouts,
+            rng,
+        ))?;
 
         let t1_keys = khf
             .derive_many([0, 5, 7])
@@ -456,5 +473,7 @@ mod tests {
         assert_eq!(t2_keys, t3_keys);
         assert_ne!(t3_keys, t4_keys);
         assert_eq!(k1, k2);
+
+        Ok(())
     }
 }

@@ -294,26 +294,26 @@ where
         })
     }
 
-    fn derive(&mut self, key: Self::KeyId) -> Self::Key {
+    fn derive(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
         // Three cases for any key derivation:
         //  1) The key has been updated.
         //  2) The key needs to be appended.
         //  3) The key already exists in the root list.
         if self.state.updated_keys.contains(&key) {
-            self.state.update_key(key)
+            Ok(self.state.update_key(key))
         } else if key >= self.state.keys {
-            self.state.append_key(key)
+            Ok(self.state.append_key(key))
         } else {
-            self.state.derive_key(key)
+            Ok(self.state.derive_key(key))
         }
     }
 
-    fn update(&mut self, key: Self::KeyId) -> Self::Key {
+    fn update(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
         // Append keys if we don't cover the key yet.
         if key >= self.state.keys {
             self.state.append_key(key);
         }
-        self.state.update_key(key)
+        Ok(self.state.update_key(key))
     }
 
     fn commit(&mut self) {

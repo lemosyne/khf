@@ -268,9 +268,9 @@ where
             master_key_file: if let Some(file) = master_key_file {
                 Some(
                     File::options()
+                        .read(true)
                         .write(true)
                         .create(true)
-                        .truncate(true)
                         .open(file)?,
                 )
             } else {
@@ -285,9 +285,9 @@ where
                 keys: 0,
             },
             state_file: File::options()
+                .read(true)
                 .write(true)
                 .create(true)
-                .truncate(true)
                 .open(state_file)?,
             rng,
             phantom: PhantomData,

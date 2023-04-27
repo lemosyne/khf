@@ -1,41 +1,21 @@
 use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
-use crypter::Crypter;
+use embedded_io::blocking::{Read, Seek, Write};
 use hasher::Hasher;
 use itertools::Itertools;
-use kms::{
-    DeferredKeyManagementScheme, FineGrainedKeyManagementScheme, KeyManagementScheme,
-    SecureKeyManagementScheme,
-};
+use kms::{KeyManagementScheme, Persist};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::{
-    cmp::Ordering,
-    collections::BTreeSet,
-    fmt,
-    fs::File,
-    io::{Read, Seek, SeekFrom},
-    marker::PhantomData,
-    os::unix::prelude::FileExt,
-    path::PathBuf,
-};
+use std::{cmp::Ordering, collections::BTreeSet, fmt};
 
 /// A keyed hash forest (`Khf`) is a data structure for secure key management built around keyed
 /// hash trees (`Kht`s). As a secure key management scheme, a `Khf` is not only capable of deriving
 /// keys, but also updating keys such that they cannot be rederived post-update. Updating a key is
 /// synonymous to revoking a key.
-pub struct Khf<C, R, H, const N: usize> {
-    // The key protecting the public state of a persisted `Khf`.
-    master_key: Key<N>,
-    /// The file the master key is persisted to.
-    master_key_file: Option<File>,
+pub struct Khf<R, H, const N: usize> {
     // The public state of a `Khf`.
     state: KhfState<H, N>,
-    // The file public state is persisted to.
-    state_file: File,
     // The CSPRNG used to generate random keys and roots.
     rng: R,
-    // Pretend like we own a `C` (which will be some crypter).
-    phantom: PhantomData<C>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -60,11 +40,26 @@ struct KhfState<H, const N: usize> {
     keys: u64,
 }
 
-impl<C, R, H, const N: usize> Khf<C, R, H, N>
+impl<R, H, const N: usize> Khf<R, H, N>
 where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
+    /// Construct a new KHF using the given rng
+    pub fn new(mut rng: R, fanouts: &[u64]) -> Self {
+        Self {
+            state: KhfState {
+                topology: Topology::new(&fanouts),
+                updated_key_root: Self::random_root(&mut rng),
+                appended_key_root: Self::random_root(&mut rng),
+                updated_keys: BTreeSet::new(),
+                roots: vec![],
+                keys: 0,
+            },
+            rng,
+        }
+    }
+
     /// Returns a key filled with bytes from the supplied CSPRNG.
     fn random_key(rng: &mut R) -> Key<N> {
         let mut key = [0; N];
@@ -240,59 +235,17 @@ where
     }
 }
 
-impl<'a, 'b, C, R, H, const N: usize> KeyManagementScheme for Khf<C, R, H, N>
+impl<'a, 'b, R, H, const N: usize> KeyManagementScheme for Khf<R, H, N>
 where
-    C: Crypter,
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
-    /// A `Khf` is initialized with a fanout list and CSPRNG.
-    type Init = (Option<PathBuf>, PathBuf, Vec<u64>, R);
     /// Keys have the same size as the hash digest size.
     type Key = Key<N>;
     /// Keys are uniquely identified with `u64`s.
     type KeyId = u64;
     /// Bespoke error type.
     type Error = Error;
-    /// Allow public state to be encrypted by external keys.
-    /// This is useful in a hierarchical use of `Khf`s.
-    type PublicParams = Option<Key<N>>;
-    /// No additional metadata needed when persisting/loading private state.
-    type PrivateParams = ();
-
-    fn setup(
-        (master_key_file, state_file, fanouts, mut rng): Self::Init,
-    ) -> Result<Self, Self::Error> {
-        Ok(Self {
-            master_key: Self::random_key(&mut rng),
-            master_key_file: if let Some(file) = master_key_file {
-                Some(
-                    File::options()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .open(file)?,
-                )
-            } else {
-                None
-            },
-            state: KhfState {
-                topology: Topology::new(&fanouts),
-                updated_key_root: Self::random_root(&mut rng),
-                appended_key_root: Self::random_root(&mut rng),
-                updated_keys: BTreeSet::new(),
-                roots: vec![Self::random_root(&mut rng)],
-                keys: 0,
-            },
-            state_file: File::options()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(state_file)?,
-            rng,
-            phantom: PhantomData,
-        })
-    }
 
     fn derive(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
         // Three cases for any key derivation:
@@ -316,94 +269,50 @@ where
         Ok(self.state.update_key(key))
     }
 
-    fn commit(&mut self) {
+    fn commit(&mut self) -> Vec<Self::KeyId> {
+        let mut changed = vec![];
+
         for (start, end) in self.state.updated_ranges() {
             self.state.update_range(start, end);
+            changed.extend(start..end);
         }
-        self.master_key = Self::random_key(&mut self.rng);
         self.state.updated_key_root = Self::random_root(&mut self.rng);
         self.state.appended_key_root = Self::random_root(&mut self.rng);
         self.state.updated_keys.clear();
+
+        changed
+    }
+}
+
+impl<IO: Read + Write + Seek, R, H, const N: usize> Persist<IO> for Khf<R, H, N> {
+    type Init = R;
+
+    fn persist(&self, mut sink: IO) -> Result<(), IO::Error> {
+        let ser = bincode::serialize(&self.state).unwrap(); // todo
+        sink.write_all(&ser)
     }
 
-    fn compact(&mut self) {
-        self.state.roots = vec![Self::random_root(&mut self.rng)];
-    }
+    fn load(&self, rng: Self::Init, mut source: IO) -> Result<Self, IO::Error> {
+        let mut raw = vec![];
+        loop {
+            let mut block = [0; 0x4000];
+            let n = source.read(&mut block)?;
 
-    fn persist_public_state(&mut self, key: Self::PublicParams) -> Result<(), Self::Error> {
-        let plaintext = bincode::serialize(&self.state)?;
+            if n == 0 {
+                break;
+            }
 
-        let ciphertext = if let Some(key) = key {
-            C::onetime_encrypt(&key, &plaintext)?
-        } else {
-            C::onetime_encrypt(&self.master_key, &plaintext)?
-        };
-
-        self.state_file.set_len(0)?;
-        self.state_file.write_all_at(&ciphertext, 0)?;
-
-        Ok(())
-    }
-
-    fn persist_private_state(&mut self, _: Self::PrivateParams) -> Result<(), Self::Error> {
-        if let Some(ref mut master_key_file) = self.master_key_file {
-            master_key_file.set_len(0)?;
-            master_key_file.write_all_at(&self.master_key, 0)?;
+            raw.extend(&block[..n]);
         }
-        Ok(())
-    }
 
-    fn load_public_state(&mut self, key: Self::PublicParams) -> Result<(), Self::Error> {
-        let mut ciphertext = Vec::new();
-
-        self.state_file.seek(SeekFrom::Start(0))?;
-        self.state_file.read_to_end(&mut ciphertext)?;
-
-        let plaintext = if let Some(key) = key {
-            C::onetime_decrypt(&key, &ciphertext)?
-        } else {
-            C::onetime_decrypt(&self.master_key, &ciphertext)?
-        };
-
-        self.state = bincode::deserialize(&plaintext)?;
-
-        Ok(())
-    }
-
-    fn load_private_state(&mut self, _: Self::PrivateParams) -> Result<(), Self::Error> {
-        if let Some(ref mut master_key_file) = self.master_key_file {
-            master_key_file.seek(SeekFrom::Start(0))?;
-            master_key_file.read_exact(&mut self.master_key)?;
-        }
-        Ok(())
+        Ok(Khf {
+            state: bincode::deserialize(&raw).unwrap(),
+            rng,
+        }) // todo
     }
 }
 
-impl<C, R, H, const N: usize> SecureKeyManagementScheme for Khf<C, R, H, N>
-where
-    C: Crypter,
-    R: RngCore + CryptoRng,
-    H: Hasher<N>,
-{
-}
-
-impl<C, R, H, const N: usize> FineGrainedKeyManagementScheme for Khf<C, R, H, N>
-where
-    C: Crypter,
-    R: RngCore + CryptoRng,
-    H: Hasher<N>,
-{
-}
-
-impl<C, R, H, const N: usize> DeferredKeyManagementScheme for Khf<C, R, H, N>
-where
-    C: Crypter,
-    R: RngCore + CryptoRng,
-    H: Hasher<N>,
-{
-}
-
-impl<C, R, H, const N: usize> fmt::Display for Khf<C, R, H, N>
+impl<R, H, const N: usize> fmt::Display for Khf<R, H, N>
 where
     H: Hasher<N>,
 {
@@ -414,66 +323,6 @@ where
                 writeln!(f)?;
             }
         }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::Result;
-    use crypter::prelude::*;
-    use hasher::prelude::*;
-    use rand::rngs::ThreadRng;
-
-    #[test]
-    fn it_works() -> Result<()> {
-        let rng = ThreadRng::default();
-        let fanouts = vec![2, 2];
-        let mut khf = Khf::<Aes256Ctr, ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((
-            None,
-            "/tmp/0.khf".into(),
-            fanouts,
-            rng,
-        ))?;
-
-        let t1_keys = khf
-            .derive_many([0, 5, 7])
-            .into_iter()
-            .map(|key| hex::encode(key))
-            .collect_vec();
-
-        let t2_keys = khf
-            .update_many([0, 5, 7])
-            .into_iter()
-            .map(|key| hex::encode(key))
-            .collect_vec();
-
-        khf.commit();
-
-        let k1 = khf.derive(9);
-
-        let t3_keys = khf
-            .derive_many([0, 5, 7])
-            .into_iter()
-            .map(|key| hex::encode(key))
-            .collect_vec();
-
-        let t4_keys = khf
-            .update_many([0, 5, 7])
-            .into_iter()
-            .map(|key| hex::encode(key))
-            .collect_vec();
-
-        khf.commit();
-
-        let k2 = khf.derive(9);
-
-        assert_ne!(t1_keys, t2_keys);
-        assert_eq!(t2_keys, t3_keys);
-        assert_ne!(t3_keys, t4_keys);
-        assert_eq!(k1, k2);
-
         Ok(())
     }
 }

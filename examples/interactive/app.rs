@@ -1,7 +1,6 @@
 use crate::command::Command;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crypter::Crypter;
 use hasher::Hasher;
 use khf::Khf;
 use kms::KeyManagementScheme;
@@ -17,20 +16,19 @@ use tui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-pub struct App<C, R, H, const N: usize> {
+pub struct App<R, H, const N: usize> {
     command: String,
     history: Vec<String>,
-    forest: Khf<C, R, H, N>,
+    forest: Khf<R, H, N>,
     scroll: u16,
 }
 
-impl<C, R, H, const N: usize> App<C, R, H, N>
+impl<R, H, const N: usize> App<R, H, N>
 where
-    C: Crypter,
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
-    pub fn new(forest: Khf<C, R, H, N>) -> Self {
+    pub fn new(forest: Khf<R, H, N>) -> Self {
         Self {
             command: " $ ".into(),
             history: Vec::new(),
@@ -54,13 +52,10 @@ where
                         let mut command = self.command.drain(3..).collect::<String>();
                         match Command::from_str(&command)? {
                             Command::Derive(key) => {
-                                write!(command, " [{}]", hex::encode(self.forest.derive(key)))?;
+                                write!(command, " [{}]", hex::encode(self.forest.derive(key)?))?;
                             }
                             Command::Update(key) => {
-                                write!(command, " [{}]", hex::encode(self.forest.update(key)))?;
-                            }
-                            Command::Compact => {
-                                self.forest.compact();
+                                write!(command, " [{}]", hex::encode(self.forest.update(key)?))?;
                             }
                             Command::Commit => {
                                 self.forest.commit();

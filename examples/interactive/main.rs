@@ -5,10 +5,8 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use crypter::prelude::*;
 use hasher::prelude::*;
 use khf::Khf;
-use kms::KeyManagementScheme;
 use rand::prelude::ThreadRng;
 use std::io;
 use tui::{backend::CrosstermBackend, Terminal};
@@ -28,12 +26,8 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let forest = Khf::<Aes256Ctr, ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::setup((
-        None,
-        "/tmp/interactive.khf".into(),
-        args.fanouts.clone(),
-        ThreadRng::default(),
-    ))?;
+    let forest =
+        Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::new(ThreadRng::default(), &args.fanouts);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();

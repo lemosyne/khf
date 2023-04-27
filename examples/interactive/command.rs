@@ -12,7 +12,6 @@ use std::str::FromStr;
 pub enum Command {
     Derive(u64),
     Update(u64),
-    Compact,
     Commit,
     Invalid,
     Clear,
@@ -26,7 +25,7 @@ impl FromStr for Command {
 }
 
 pub fn parse_cmd(input: &str) -> IResult<&str, Command> {
-    alt((derive_cmd, update_cmd, compact_cmd, commit_cmd, clear_cmd))(input)
+    alt((derive_cmd, update_cmd, commit_cmd, clear_cmd))(input)
 }
 
 fn derive_cmd(input: &str) -> IResult<&str, Command> {
@@ -53,12 +52,6 @@ fn update_cmd(input: &str) -> IResult<&str, Command> {
         )),
         |(_, _, _, key, _)| Command::Update(key),
     )(input)
-}
-
-fn compact_cmd(input: &str) -> IResult<&str, Command> {
-    map(delimited(multispace0, tag("compact"), multispace0), |_| {
-        Command::Compact
-    })(input)
 }
 
 fn commit_cmd(input: &str) -> IResult<&str, Command> {

@@ -288,7 +288,8 @@ impl<IO: Read + Write + Seek, R, H, const N: usize> Persist<IO> for Khf<R, H, N>
     type Init = R;
 
     fn persist(&self, mut sink: IO) -> Result<(), IO::Error> {
-        let ser = bincode::serialize(&self.state).unwrap(); // todo
+        // TODO: stream serialization
+        let ser = bincode::serialize(&self.state).unwrap();
         sink.write_all(&ser)
     }
 
@@ -305,10 +306,11 @@ impl<IO: Read + Write + Seek, R, H, const N: usize> Persist<IO> for Khf<R, H, N>
             raw.extend(&block[..n]);
         }
 
+        // TODO: stream serialization
         Ok(Khf {
             state: bincode::deserialize(&raw).unwrap(),
             rng,
-        }) // todo
+        })
     }
 }
 

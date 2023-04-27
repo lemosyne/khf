@@ -1,5 +1,5 @@
 use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
-use embedded_io::blocking::{Read, Seek, Write};
+use embedded_io::blocking::{Read, Write};
 use hasher::Hasher;
 use itertools::Itertools;
 use kms::{KeyManagementScheme, Persist};
@@ -284,7 +284,7 @@ where
     }
 }
 
-impl<IO: Read + Write + Seek, R, H, const N: usize> Persist<IO> for Khf<R, H, N> {
+impl<IO: Read + Write, R, H, const N: usize> Persist<IO> for Khf<R, H, N> {
     type Init = R;
 
     fn persist(&self, mut sink: IO) -> Result<(), IO::Error> {

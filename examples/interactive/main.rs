@@ -5,7 +5,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use hasher::prelude::*;
+use hasher::openssl::*;
 use khf::Khf;
 use rand::prelude::ThreadRng;
 use std::io;

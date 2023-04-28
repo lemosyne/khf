@@ -7,10 +7,7 @@ pub enum Error {
     IO(#[from] io::Error),
 
     #[error(transparent)]
-    Serde(#[from] bincode::Error),
-
-    #[error(transparent)]
-    Crypter(#[from] crypter::Error),
+    Bincode(#[from] bincode::Error),
 
     #[error("unknown error")]
     Unknown,

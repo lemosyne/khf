@@ -10,4 +10,6 @@ pub use crate::kht::Kht;
 
 mod error;
 pub use error::Error;
-pub type Result<T> = std::result::Result<T, Error>;
+
+mod result;
+pub use result::Result;

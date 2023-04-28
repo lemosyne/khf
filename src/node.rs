@@ -2,7 +2,7 @@ use crate::{
     aliases::{Key, Pos},
     topology::Topology,
 };
-use hasher::prelude::*;
+use hasher::Hasher;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{fmt, marker::PhantomData};

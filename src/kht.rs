@@ -1,5 +1,5 @@
 use crate::{aliases::Key, node::Node, topology::Topology};
-use hasher::prelude::*;
+use hasher::Hasher;
 use std::fmt;
 
 pub struct Kht<H, const N: usize> {

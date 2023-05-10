@@ -1,15 +1,17 @@
 use crate::{aliases::Key, node::Node, topology::Topology};
 use hasher::Hasher;
+use num_traits::PrimInt;
 use std::fmt;
 
-pub struct Kht<H, const N: usize> {
-    root: Node<H, N>,
-    topology: Topology,
+pub struct Kht<H, O, const N: usize> {
+    root: Node<H, O, N>,
+    topology: Topology<O>,
 }
 
-impl<H, const N: usize> Kht<H, N>
+impl<H, O, const N: usize> Kht<H, O, N>
 where
     H: Hasher<N>,
+    O: PrimInt,
 {
     pub fn new(key: Key<N>) -> Self {
         Self {
@@ -18,22 +20,16 @@ where
         }
     }
 
-    pub fn derive(&self, leaf: u64) -> Key<N> {
-        self.topology
-            .path(self.root.pos, self.topology.leaf_position(leaf))
-            .fold(self.root.key, |key, pos| {
-                let mut hasher = H::new();
-                hasher.update(&key);
-                hasher.update(&pos.0.to_le_bytes());
-                hasher.update(&pos.1.to_le_bytes());
-                hasher.finish()
-            })
+    pub fn derive(&self, leaf: O) -> Key<N> {
+        self.root
+            .derive(&self.topology, self.topology.leaf_position(leaf))
     }
 }
 
-impl<H, const N: usize> fmt::Display for Kht<H, N>
+impl<H, O, const N: usize> fmt::Display for Kht<H, O, N>
 where
     H: Hasher<N>,
+    O: PrimInt + fmt::Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.root.fmt(f, &self.topology)

@@ -3,32 +3,34 @@ use crate::{
     topology::Topology,
 };
 use hasher::Hasher;
+use num_traits::PrimInt;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{fmt, marker::PhantomData};
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub struct Node<H, const N: usize> {
-    pub pos: Pos,
+pub struct Node<H, O, const N: usize> {
+    pub pos: Pos<O>,
     #[serde_as(as = "[_; N]")]
     pub key: Key<N>,
     phantoms: PhantomData<H>,
 }
 
-impl<H, const N: usize> Node<H, N>
+impl<H, O, const N: usize> Node<H, O, N>
 where
     H: Hasher<N>,
+    O: PrimInt,
 {
     pub fn new(key: Key<N>) -> Self {
         Self {
-            pos: (0, 0),
+            pos: (0, O::zero()),
             key,
             phantoms: PhantomData,
         }
     }
 
-    pub fn with_pos(pos: Pos, key: Key<N>) -> Self {
+    pub fn with_pos(pos: Pos<O>, key: Key<N>) -> Self {
         Self {
             pos,
             key,
@@ -36,7 +38,10 @@ where
         }
     }
 
-    pub fn derive(&self, topology: &Topology, pos: Pos) -> Key<N> {
+    // TODO: Don't convert to `u128`.
+    // This requires the `ToBytes` trait to be added.
+    // https://github.com/rust-num/num-traits/pull/224
+    pub fn derive(&self, topology: &Topology<O>, pos: Pos<O>) -> Key<N> {
         if self.pos == pos {
             self.key
         } else {
@@ -44,13 +49,13 @@ where
                 let mut hasher = H::new();
                 hasher.update(&key);
                 hasher.update(&pos.0.to_le_bytes());
-                hasher.update(&pos.1.to_le_bytes());
+                hasher.update(&pos.1.to_u128().unwrap().to_le_bytes());
                 hasher.finish()
             })
         }
     }
 
-    pub fn coverage(&self, topology: &Topology, start: u64, end: u64) -> Vec<Self> {
+    pub fn coverage(&self, topology: &Topology<O>, start: O, end: O) -> Vec<Self> {
         topology
             .coverage(start, end)
             .map(|pos| Self {
@@ -60,17 +65,23 @@ where
             })
             .collect()
     }
+}
 
-    pub(crate) fn fmt(&self, f: &mut fmt::Formatter<'_>, topology: &Topology) -> fmt::Result {
+impl<H, O, const N: usize> Node<H, O, N>
+where
+    H: Hasher<N>,
+    O: PrimInt + fmt::Display,
+{
+    pub(crate) fn fmt(&self, f: &mut fmt::Formatter<'_>, topology: &Topology<O>) -> fmt::Result {
         self.fmt_helper(f, topology, String::new(), self.pos, true)
     }
 
     fn fmt_helper(
         &self,
         f: &mut fmt::Formatter,
-        topology: &Topology,
+        topology: &Topology<O>,
         prefix: String,
-        pos: Pos,
+        pos: Pos<O>,
         last: bool,
     ) -> fmt::Result {
         if let Some(width) = f.width() {

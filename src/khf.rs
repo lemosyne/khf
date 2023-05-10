@@ -11,36 +11,36 @@ use std::{cmp::Ordering, collections::BTreeSet, fmt};
 /// hash trees (`Kht`s). As a secure key management scheme, a `Khf` is not only capable of deriving
 /// keys, but also updating keys such that they cannot be rederived post-update. Updating a key is
 /// synonymous to revoking a key.
-pub struct Khf<R, H, const N: usize> {
+pub struct Khf<R, H, L, O, const N: usize> {
     // The public state of a `Khf`.
-    state: KhfState<H, N>,
+    state: KhfState<H, L, O, N>,
     // The CSPRNG used to generate random keys and roots.
     rng: R,
 }
 
 #[derive(Deserialize, Serialize)]
-struct KhfState<H, const N: usize> {
+struct KhfState<H, L, O, const N: usize> {
     // The topology of a `Khf`.
-    topology: Topology,
+    topology: Topology<L, O>,
     // The root that updated keys are derived from.
-    #[serde(bound(serialize = "Node<H, N>: Serialize"))]
-    #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
-    updated_key_root: Node<H, N>,
+    #[serde(bound(serialize = "Node<H, L, O, N>: Serialize"))]
+    #[serde(bound(deserialize = "Node<H, L, O, N>: Deserialize<'de>"))]
+    updated_key_root: Node<H, L, O, N>,
     // The root that appended keys are derived from.
-    #[serde(bound(serialize = "Node<H, N>: Serialize"))]
-    #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
-    appended_key_root: Node<H, N>,
+    #[serde(bound(serialize = "Node<H, L, O, N>: Serialize"))]
+    #[serde(bound(deserialize = "Node<H, L, O, N>: Deserialize<'de>"))]
+    appended_key_root: Node<H, L, O, N>,
     // Tracks updated keys.
     updated_keys: BTreeSet<u64>,
     // The list of roots.
-    #[serde(bound(serialize = "Node<H, N>: Serialize"))]
-    #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
-    roots: Vec<Node<H, N>>,
+    #[serde(bound(serialize = "Node<H, L, O, N>: Serialize"))]
+    #[serde(bound(deserialize = "Node<H, L, O, N>: Deserialize<'de>"))]
+    roots: Vec<Node<H, L, O, N>>,
     // The number of keys a `Khf` currently provides.
     keys: u64,
 }
 
-impl<R, H, const N: usize> Khf<R, H, N>
+impl<R, H, L, O, const N: usize> Khf<R, H, L, O, N>
 where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
@@ -68,7 +68,7 @@ where
     }
 
     /// Returns a root with a pseudorandom key.
-    fn random_root(rng: &mut R) -> Node<H, N> {
+    fn random_root(rng: &mut R) -> Node<H, L, O, N> {
         Node::new(Self::random_key(rng))
     }
 
@@ -78,7 +78,7 @@ where
     }
 }
 
-impl<H, const N: usize> KhfState<H, N>
+impl<H, L, O, const N: usize> KhfState<H, L, O, N>
 where
     H: Hasher<N>,
 {
@@ -235,7 +235,7 @@ where
     }
 }
 
-impl<'a, 'b, R, H, const N: usize> KeyManagementScheme for Khf<R, H, N>
+impl<'a, 'b, R, H, L, O, const N: usize> KeyManagementScheme for Khf<R, H, L, O, N>
 where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
@@ -284,7 +284,7 @@ where
     }
 }
 
-impl<IO: Read + Write, R, H, const N: usize> Persist<IO> for Khf<R, H, N> {
+impl<IO: Read + Write, R, H, L, O, const N: usize> Persist<IO> for Khf<R, H, L, O, N> {
     type Init = R;
 
     fn persist(&self, mut sink: IO) -> Result<(), IO::Error> {
@@ -314,7 +314,7 @@ impl<IO: Read + Write, R, H, const N: usize> Persist<IO> for Khf<R, H, N> {
     }
 }
 
-impl<R, H, const N: usize> fmt::Display for Khf<R, H, N>
+impl<R, H, L, O, const N: usize> fmt::Display for Khf<R, H, L, O, N>
 where
     H: Hasher<N>,
 {

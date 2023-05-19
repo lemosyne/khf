@@ -284,16 +284,16 @@ where
     }
 }
 
-impl<IO: Read + Write, R, H, const N: usize> Persist<IO> for Khf<R, H, N> {
+impl<Io: Read + Write, R, H, const N: usize> Persist<Io> for Khf<R, H, N> {
     type Init = R;
 
-    fn persist(&mut self, mut sink: IO) -> Result<(), IO::Error> {
+    fn persist(&mut self, mut sink: Io) -> Result<(), Io::Error> {
         // TODO: stream serialization
         let ser = bincode::serialize(&self.state).unwrap();
         sink.write_all(&ser)
     }
 
-    fn load(rng: Self::Init, mut source: IO) -> Result<Self, IO::Error> {
+    fn load(rng: Self::Init, mut source: Io) -> Result<Self, Io::Error> {
         let mut raw = vec![];
         loop {
             let mut block = [0; 0x4000];

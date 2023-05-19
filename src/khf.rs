@@ -1,7 +1,6 @@
 use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
 use embedded_io::blocking::{Read, Write};
 use hasher::Hasher;
-use itertools::Itertools;
 use kms::{KeyManagementScheme, Persist};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -22,14 +21,6 @@ pub struct Khf<R, H, const N: usize> {
 struct KhfState<H, const N: usize> {
     // The topology of a `Khf`.
     topology: Topology,
-    // The root that updated keys are derived from.
-    #[serde(bound(serialize = "Node<H, N>: Serialize"))]
-    #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
-    updated_key_root: Node<H, N>,
-    // The root that appended keys are derived from.
-    #[serde(bound(serialize = "Node<H, N>: Serialize"))]
-    #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
-    appended_key_root: Node<H, N>,
     // Tracks updated keys.
     updated_keys: BTreeSet<u64>,
     // The list of roots.
@@ -46,12 +37,10 @@ where
     H: Hasher<N>,
 {
     /// Construct a new KHF using the given rng
-    pub fn new(mut rng: R, fanouts: &[u64]) -> Self {
+    pub fn new(rng: R, fanouts: &[u64]) -> Self {
         Self {
             state: KhfState {
                 topology: Topology::new(&fanouts),
-                updated_key_root: Self::random_root(&mut rng),
-                appended_key_root: Self::random_root(&mut rng),
                 updated_keys: BTreeSet::new(),
                 roots: vec![],
                 keys: 0,
@@ -88,7 +77,7 @@ where
     }
 
     /// Appends a key, deriving it from the root for appended keys.
-    fn append_key(&mut self, key: u64) -> Key<N> {
+    fn append_key(&mut self, root: Node<H, N>, key: u64) -> Key<N> {
         // No need to append additional roots the forest is already consolidated.
         if self.is_consolidated() {
             self.keys = self.keys.max(key);
@@ -110,29 +99,19 @@ where
         //
         // Doing this will allow us to append more keys later by simply adding L1 roots.
         let needed = self.topology.descendants(1) - (self.keys % self.topology.descendants(1));
-        self.roots.append(&mut self.appended_key_root.coverage(
-            &self.topology,
-            self.keys,
-            self.keys + needed,
-        ));
+        self.roots
+            .append(&mut root.coverage(&self.topology, self.keys, self.keys + needed));
         self.keys += needed;
 
         // Add L1 roots until we have one that covers the desired key.
         while self.keys < key {
             let pos = (1, self.keys / self.topology.descendants(1));
-            let key = self.appended_key_root.derive(&self.topology, pos);
+            let key = root.derive(&self.topology, pos);
             self.roots.push(Node::with_pos(pos, key));
             self.keys += self.topology.descendants(1);
         }
 
         self.derive_key(key)
-    }
-
-    /// Updates a key, deriving it from the root for updated keys.
-    fn update_key(&mut self, key: u64) -> Key<N> {
-        self.updated_keys.insert(key);
-        self.updated_key_root
-            .derive(&self.topology, self.topology.leaf_position(key))
     }
 
     /// Derives a key from an existing root in the root list.
@@ -153,28 +132,8 @@ where
         self.roots[index].derive(&self.topology, pos)
     }
 
-    /// Returns a `Vec` of ranges of updated keys.
-    fn updated_ranges(&self) -> Vec<(u64, u64)> {
-        self.updated_keys
-            .iter()
-            .peekable()
-            .batching(|it| match it.peek() {
-                Some(&key) => {
-                    let num_keys = it
-                        .enumerate()
-                        .map(|(i, nkey)| (i as u64, nkey))
-                        .peekable()
-                        .peeking_take_while(|(i, nkey)| key + *i + 1 == **nkey)
-                        .count() as u64;
-                    Some((*key, key + num_keys + 1))
-                }
-                None => None,
-            })
-            .collect()
-    }
-
     /// Updates a range of keys using the forest's root for updated keys.
-    fn update_range(&mut self, start: u64, end: u64) {
+    fn update_range(&mut self, root: Node<H, N>, start: u64, end: u64) {
         // Updates cause consolidated forests to fragment.
         if self.is_consolidated() {
             if self.keys == 0 {
@@ -204,7 +163,7 @@ where
 
         // Save roots before the first root affected by the update, then add the updated roots.
         roots.extend(&mut self.roots.drain(..update_start));
-        updated.append(&mut self.updated_key_root.coverage(&self.topology, start, end));
+        updated.append(&mut root.coverage(&self.topology, start, end));
 
         // Find the last root affected by the update.
         let mut update_end = self.roots.len();
@@ -248,39 +207,37 @@ where
     type Error = Error;
 
     fn derive(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        // Three cases for any key derivation:
-        //  1) The key has been updated.
+        // Two cases for key derivation:
         //  2) The key needs to be appended.
         //  3) The key already exists in the root list.
-        if self.state.updated_keys.contains(&key) {
-            Ok(self.state.update_key(key))
-        } else if key >= self.state.keys {
-            Ok(self.state.append_key(key))
+        if key >= self.state.keys {
+            let root = Self::random_root(&mut self.rng);
+            Ok(self.state.append_key(root, key))
         } else {
             Ok(self.state.derive_key(key))
         }
     }
 
     fn update(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        // Append keys if we don't cover the key yet.
+        // Append the key if we don't cover it yet.
         if key >= self.state.keys {
-            self.state.append_key(key);
+            let root = Self::random_root(&mut self.rng);
+            self.state.append_key(root, key);
         }
-        Ok(self.state.update_key(key))
+
+        // It's a pity that we must fragment the tree here for security.
+        let root = Self::random_root(&mut self.rng);
+        self.state.update_range(root, key, key + 1);
+
+        // Mark key as updated and return it.
+        self.state.updated_keys.insert(key);
+        Ok(self.state.derive_key(key))
     }
 
     fn commit(&mut self) -> Vec<Self::KeyId> {
-        let mut changed = vec![];
-
-        for (start, end) in self.state.updated_ranges() {
-            self.state.update_range(start, end);
-            changed.extend(start..end);
-        }
-        self.state.updated_key_root = Self::random_root(&mut self.rng);
-        self.state.appended_key_root = Self::random_root(&mut self.rng);
+        let updated = self.state.updated_keys.clone();
         self.state.updated_keys.clear();
-
-        changed
+        updated.into_iter().collect()
     }
 }
 

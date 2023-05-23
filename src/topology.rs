@@ -87,11 +87,7 @@ impl Topology {
         Path::new(self, from, to)
     }
 
-    pub fn coverage(&self, start: u64, end: u64) -> Coverage<'_> {
-        Coverage::new(self, 1, start, end)
-    }
-
-    pub fn coverage_leveled(&self, level: u64, start: u64, end: u64) -> Coverage<'_> {
+    pub fn coverage(&self, level: u64, start: u64, end: u64) -> Coverage<'_> {
         Coverage::new(self, level, start, end)
     }
 }
@@ -195,27 +191,5 @@ impl<'a> Iterator for Coverage<'a> {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use itertools::Itertools;
-
-    #[test]
-    fn level_1() {
-        let topology = Topology::new(&[3, 2]);
-        let c1 = topology.coverage(5, 11).collect_vec();
-        let c2 = topology.coverage_leveled(1, 5, 11).collect_vec();
-        assert_eq!(c1, c2);
-    }
-
-    #[test]
-    fn level_2() {
-        let topology = Topology::new(&[3, 2]);
-        let c1 = vec![(3, 3), (2, 2), (2, 3), (2, 4), (3, 10)];
-        let c2 = topology.coverage_leveled(2, 3, 11).collect_vec();
-        assert_eq!(c1, c2);
     }
 }

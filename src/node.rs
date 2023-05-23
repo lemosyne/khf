@@ -60,9 +60,9 @@ where
         }
     }
 
-    pub fn coverage(&self, topology: &Topology, start: u64, end: u64) -> Vec<Self> {
+    pub fn coverage(&self, topology: &Topology, level: u64, start: u64, end: u64) -> Vec<Self> {
         topology
-            .coverage(start, end)
+            .coverage(level, start, end)
             .map(|pos| Self {
                 pos,
                 key: self.derive(topology, pos),

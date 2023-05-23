@@ -30,11 +30,18 @@ pub struct Khf<R, H, const N: usize> {
 
 /// A list of different mechanisms, or ways, to consolidate a `Khf`.
 pub enum Consolidation {
-    /// Fully consolidate a `Khf` to a single root.
+    /// Consolidate a `Khf` to a single root.
     Full,
+    /// Consolidate a `Khf` to roots of a certain level.
+    Leveled { level: u64 },
     /// Consolidate roots corresponding to a range of keys in a `Khf`.
     Ranged { start: u64, end: u64 },
+    /// Consolidate roots to a certain level corresponding to a range of keys in a `Khf`.
+    RangedLeveled { level: u64, start: u64, end: u64 },
 }
+
+/// The default level for roots created when mutating a `Khf`.
+const DEFAULT_ROOT_LEVEL: u64 = 1;
 
 impl<R, H, const N: usize> Khf<R, H, N>
 where
@@ -66,33 +73,46 @@ where
     pub fn consolidate(&mut self, mechanism: Consolidation) -> Vec<u64> {
         match mechanism {
             Consolidation::Full => self.consolidate_full(),
+            Consolidation::Leveled { level } => self.consolidate_leveled(level),
             Consolidation::Ranged { start, end } => self.consolidate_ranged(start, end),
+            Consolidation::RangedLeveled { level, start, end } => {
+                self.consolidate_ranged_leveled(level, start, end)
+            }
         }
     }
 
     // Consolidates back into a single root.
     fn consolidate_full(&mut self) -> Vec<u64> {
+        self.consolidate_leveled(0)
+    }
+
+    // Consolidates to roots of a certain level.
+    fn consolidate_leveled(&mut self, level: u64) -> Vec<u64> {
         let affected = (0..self.keys).into_iter().collect();
 
-        // Restore the `Khf` back to a clean state.
+        // Unmark keys as updated and update the whole range of keys.
         self.updated_keys.clear();
-        self.roots = vec![Node::with_rng(&mut self.rng)];
-        self.keys = 0;
+        self.update_keys(level, 0, self.keys);
 
         affected
     }
 
     // Consolidates the roots for a range of keys.
     fn consolidate_ranged(&mut self, start: u64, end: u64) -> Vec<u64> {
+        self.consolidate_ranged_leveled(DEFAULT_ROOT_LEVEL, start, end)
+    }
+
+    // Consolidates the roots for a range of keys to roots of a certain level.
+    fn consolidate_ranged_leveled(&mut self, level: u64, start: u64, end: u64) -> Vec<u64> {
         let affected = (start..end).into_iter().collect();
 
         // Make sure we cover the range of keys.
         if self.keys < end {
-            self.append_key(end);
+            self.append_key(level, end);
         }
 
         // "Update" the range of keys.
-        self.update_keys(start, end);
+        self.update_keys(level, start, end);
 
         // The consolidated range of keys shouldn't be considered as updated.
         for key in &affected {
@@ -102,16 +122,16 @@ where
         affected
     }
 
-    /// Appends a key, deriving it from the root for appended keys.
-    fn append_key(&mut self, key: u64) -> Key<N> {
+    /// Appends a key, appending roots as necessary from the specified level.
+    fn append_key(&mut self, level: u64, key: u64) -> Key<N> {
         // No need to append additional roots the forest is already consolidated.
         if self.is_consolidated() {
             self.keys = self.keys.max(key);
             return self.roots[0].derive(&self.topology, self.topology.leaf_position(key));
         }
 
-        // First, add any roots needed to reach a full L1 root.
-        // For example: assume a topology of [4] and the following roots:
+        // First, add any roots needed to reach a full root of the specified level.
+        // For example: assume a topology of [4], a target of L1, and the following roots:
         //
         // (2,0) (2,1)
         //
@@ -123,20 +143,24 @@ where
         //   |     |     |     |
         // (2,0) (2,1) (2,2) (2,3)
         //
-        // Doing this will allow us to append more keys later by simply adding L1 roots.
-        // The roots will be derived from a new, random root.
-        let root = Node::with_rng(&mut self.rng);
-        let needed = self.topology.descendants(1) - (self.keys % self.topology.descendants(1));
-        self.roots
-            .append(&mut root.coverage(&self.topology, self.keys, self.keys + needed));
+        // This allows us to append more keys later by adding roots of the specified level.
+        //
+        // First, compute the number of keys needed to reach a full root of the specified level.
+        let needed =
+            self.topology.descendants(level) - (self.keys % self.topology.descendants(level));
         self.keys += needed;
 
-        // Add L1 roots until we have one that covers the desired key.
+        // Then, add in the roots of the specified level (each derived from a random root).
+        let root = Node::with_rng(&mut self.rng);
+        self.roots
+            .append(&mut root.coverage(&self.topology, level, self.keys, self.keys + needed));
+
+        // Add roots of the specified level until we have one that covers the desired key.
         while self.keys < key {
-            let pos = (1, self.keys / self.topology.descendants(1));
+            let pos = (level, self.keys / self.topology.descendants(level));
             let key = root.derive(&self.topology, pos);
             self.roots.push(Node::with_pos(pos, key));
-            self.keys += self.topology.descendants(1);
+            self.keys += self.topology.descendants(level);
         }
 
         self.derive_key(key)
@@ -161,13 +185,21 @@ where
     }
 
     /// Updates a range of keys using the forest's root for updated keys.
-    fn update_keys(&mut self, start: u64, end: u64) {
+    fn update_keys(&mut self, level: u64, start: u64, end: u64) {
+        // Level 0 means consolidating to a single root.
+        if level == 0 {
+            self.roots = vec![Node::with_rng(&mut self.rng)];
+            self.keys = end;
+            self.updated_keys.extend(start..end);
+            return;
+        }
+
         // Updates cause consolidated forests to fragment.
         if self.is_consolidated() {
             if self.keys == 0 {
                 self.keys = end;
             }
-            self.roots = self.roots[0].coverage(&self.topology, 0, self.keys + 1);
+            self.roots = self.roots[0].coverage(&self.topology, level, 0, self.keys);
         }
 
         // We need to create a new set of roots and store updated roots.
@@ -184,6 +216,7 @@ where
         if self.topology.start(update_root.pos) != start {
             updated.append(&mut update_root.coverage(
                 &self.topology,
+                level,
                 self.topology.start(update_root.pos),
                 start,
             ));
@@ -194,7 +227,7 @@ where
 
         // Added updated roots derived from a new random root.
         let root = Node::with_rng(&mut self.rng);
-        updated.append(&mut root.coverage(&self.topology, start, end));
+        updated.append(&mut root.coverage(&self.topology, level, start, end));
 
         // Find the last root affected by the update.
         let mut update_end = self.roots.len();
@@ -209,6 +242,7 @@ where
             if self.topology.end(update_root.pos) != end {
                 updated.append(&mut update_root.coverage(
                     &self.topology,
+                    level,
                     end,
                     self.topology.end(update_root.pos),
                 ));
@@ -221,8 +255,8 @@ where
 
         // Update roots and number of keys.
         self.roots = roots;
-        self.updated_keys.extend(start..end);
         self.keys = self.topology.end(self.roots.last().unwrap().pos);
+        self.updated_keys.extend(start..end);
     }
 }
 
@@ -243,7 +277,7 @@ where
         //  1) The key needs to be appended.
         //  2) The key already exists in the root list.
         if key >= self.keys {
-            Ok(self.append_key(key))
+            Ok(self.append_key(DEFAULT_ROOT_LEVEL, key))
         } else {
             Ok(self.derive_key(key))
         }
@@ -252,28 +286,21 @@ where
     fn update(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
         // Append the key if we don't cover it yet.
         if key >= self.keys {
-            self.append_key(key);
+            self.append_key(DEFAULT_ROOT_LEVEL, key);
         }
 
         // It's a pity that we must fragment the tree here for security.
-        self.update_keys(key, key + 1);
+        self.update_keys(DEFAULT_ROOT_LEVEL, key, key + 1);
 
         Ok(self.derive_key(key))
     }
 
     fn commit(&mut self) -> Vec<Self::KeyId> {
-        let updated = self.updated_keys.clone();
-        self.updated_keys.clear();
-        updated.into_iter().collect()
+        self.updated_keys.drain().collect()
     }
 }
 
-impl<Io: Read + Write, R, H, const N: usize> Persist<Io> for Khf<R, H, N>
-where
-    R: Default,
-{
-    type Init = R;
-
+impl<Io: Read + Write, R: Default, H, const N: usize> Persist<Io> for Khf<R, H, N> {
     fn persist(&mut self, mut sink: Io) -> Result<(), Io::Error> {
         // TODO: Stream serialization.
         let ser = bincode::serialize(&self).unwrap();

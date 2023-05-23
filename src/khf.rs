@@ -301,16 +301,19 @@ where
 }
 
 impl<Io: Read + Write, R: Default, H, const N: usize> Persist<Io> for Khf<R, H, N> {
-    fn persist(&mut self, mut sink: Io) -> Result<(), Io::Error> {
+    type Init = ();
+    type Error = Error;
+
+    fn persist(&mut self, mut sink: Io) -> Result<(), Self::Error> {
         // TODO: Stream serialization.
         let ser = bincode::serialize(&self).unwrap();
-        sink.write_all(&ser)
+        sink.write_all(&ser).map_err(|_| Error::Io)
     }
 
-    fn load(mut source: Io) -> Result<Self, Io::Error> {
+    fn load(_: Self::Init, mut source: Io) -> Result<Self, Self::Error> {
         // TODO: Stream deserialization.
         let mut raw = vec![];
-        source.read_to_end(&mut raw)?;
+        source.read_to_end(&mut raw).map_err(|_| Error::Io)?;
         Ok(bincode::deserialize(&raw).unwrap())
     }
 }

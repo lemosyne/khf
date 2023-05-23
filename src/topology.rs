@@ -221,7 +221,7 @@ impl<'a> Iterator for LeveledCoverage<'a> {
         loop {
             match self.state {
                 State::Pre(level) => {
-                    if level < self.level {
+                    if level < self.level + 1 {
                         self.state = State::Intra;
                     } else if self.start % self.topology.descendants(level - 1) != 0
                         && self.start + self.topology.descendants(level) <= self.end

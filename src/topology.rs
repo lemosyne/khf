@@ -88,7 +88,11 @@ impl Topology {
     }
 
     pub fn coverage(&self, start: u64, end: u64) -> Coverage<'_> {
-        Coverage::new(self, start, end)
+        Coverage::new(self, 1, start, end)
+    }
+
+    pub fn coverage_leveled(&self, level: u64, start: u64, end: u64) -> Coverage<'_> {
+        Coverage::new(self, level, start, end)
     }
 }
 
@@ -119,6 +123,7 @@ impl<'a> Iterator for Path<'a> {
 }
 
 pub struct Coverage<'a> {
+    level: u64,
     start: u64,
     end: u64,
     state: State,
@@ -132,12 +137,15 @@ enum State {
 }
 
 impl<'a> Coverage<'a> {
-    pub fn new(topology: &'a Topology, start: u64, end: u64) -> Self {
+    pub fn new(topology: &'a Topology, level: u64, start: u64, end: u64) -> Self {
+        // Easiest way to enforce correctness (for now).
+        assert!(0 < level && level < topology.height());
         Self {
-            topology,
+            level,
             start,
             end,
             state: State::Pre(topology.height() - 1),
+            topology,
         }
     }
 }
@@ -153,75 +161,7 @@ impl<'a> Iterator for Coverage<'a> {
         loop {
             match self.state {
                 State::Pre(level) => {
-                    if level < 2 {
-                        self.state = State::Intra;
-                    } else if self.start % self.topology.descendants(level - 1) != 0
-                        && self.start + self.topology.descendants(level) <= self.end
-                    {
-                        let node = (level, self.topology.offset(self.start, level));
-                        self.start += self.topology.descendants(level);
-                        return Some(node);
-                    } else {
-                        self.state = State::Pre(level - 1);
-                    }
-                }
-                State::Intra => {
-                    if self.start + self.topology.descendants(1) <= self.end {
-                        let node = (1, self.topology.offset(self.start, 1));
-                        self.start += self.topology.descendants(1);
-                        return Some(node);
-                    } else {
-                        self.state = State::Post(2);
-                    }
-                }
-                State::Post(level) => {
-                    if level >= self.topology.height() {
-                        return None;
-                    } else if self.start + self.topology.descendants(level) <= self.end {
-                        let node = (level, self.topology.offset(self.start, level));
-                        self.start += self.topology.descendants(level);
-                        return Some(node);
-                    } else {
-                        self.state = State::Post(level + 1);
-                    }
-                }
-            }
-        }
-    }
-}
-
-pub struct LeveledCoverage<'a> {
-    level: u64,
-    start: u64,
-    end: u64,
-    state: State,
-    topology: &'a Topology,
-}
-
-impl<'a> LeveledCoverage<'a> {
-    pub fn new(level: u64, start: u64, end: u64, topology: &'a Topology) -> Self {
-        Self {
-            level,
-            start,
-            end,
-            state: State::Pre(topology.height() - 1),
-            topology,
-        }
-    }
-}
-
-impl<'a> Iterator for LeveledCoverage<'a> {
-    type Item = Pos;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.start > self.end {
-            return None;
-        }
-
-        loop {
-            match self.state {
-                State::Pre(level) => {
-                    if level < self.level + 1 {
+                    if level <= self.level {
                         self.state = State::Intra;
                     } else if self.start % self.topology.descendants(level - 1) != 0
                         && self.start + self.topology.descendants(level) <= self.end
@@ -255,5 +195,27 @@ impl<'a> Iterator for LeveledCoverage<'a> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use itertools::Itertools;
+
+    #[test]
+    fn level_1() {
+        let topology = Topology::new(&[3, 2]);
+        let c1 = topology.coverage(5, 11).collect_vec();
+        let c2 = topology.coverage_leveled(1, 5, 11).collect_vec();
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn level_2() {
+        let topology = Topology::new(&[3, 2]);
+        let c1 = vec![(3, 3), (2, 2), (2, 3), (2, 4), (3, 10)];
+        let c2 = topology.coverage_leveled(2, 3, 11).collect_vec();
+        assert_eq!(c1, c2);
     }
 }

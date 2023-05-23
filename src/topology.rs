@@ -189,3 +189,71 @@ impl<'a> Iterator for Coverage<'a> {
         }
     }
 }
+
+pub struct LeveledCoverage<'a> {
+    level: u64,
+    start: u64,
+    end: u64,
+    state: State,
+    topology: &'a Topology,
+}
+
+impl<'a> LeveledCoverage<'a> {
+    pub fn new(level: u64, start: u64, end: u64, topology: &'a Topology) -> Self {
+        Self {
+            level,
+            start,
+            end,
+            state: State::Pre(topology.height() - 1),
+            topology,
+        }
+    }
+}
+
+impl<'a> Iterator for LeveledCoverage<'a> {
+    type Item = Pos;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.start > self.end {
+            return None;
+        }
+
+        loop {
+            match self.state {
+                State::Pre(level) => {
+                    if level < self.level {
+                        self.state = State::Intra;
+                    } else if self.start % self.topology.descendants(level - 1) != 0
+                        && self.start + self.topology.descendants(level) <= self.end
+                    {
+                        let pos = (level, self.topology.offset(self.start, level));
+                        self.start += self.topology.descendants(level);
+                        return Some(pos);
+                    } else {
+                        self.state = State::Pre(level - 1);
+                    }
+                }
+                State::Intra => {
+                    if self.start + self.topology.descendants(self.level) <= self.end {
+                        let pos = (self.level, self.topology.offset(self.start, self.level));
+                        self.start += self.topology.descendants(self.level);
+                        return Some(pos);
+                    } else {
+                        self.state = State::Post(self.level + 1);
+                    }
+                }
+                State::Post(level) => {
+                    if level >= self.topology.height() {
+                        return None;
+                    } else if self.start + self.topology.descendants(level) <= self.end {
+                        let pos = (level, self.topology.offset(self.start, level));
+                        self.start += self.topology.descendants(level);
+                        return Some(pos);
+                    } else {
+                        self.state = State::Post(level + 1);
+                    }
+                }
+            }
+        }
+    }
+}

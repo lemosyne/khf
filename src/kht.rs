@@ -19,15 +19,8 @@ where
     }
 
     pub fn derive(&self, leaf: u64) -> Key<N> {
-        self.topology
-            .path(self.root.pos, self.topology.leaf_position(leaf))
-            .fold(self.root.key, |key, pos| {
-                let mut hasher = H::new();
-                hasher.update(&key);
-                hasher.update(&pos.0.to_le_bytes());
-                hasher.update(&pos.1.to_le_bytes());
-                hasher.finish()
-            })
+        self.root
+            .derive(&self.topology, self.topology.leaf_position(leaf))
     }
 }
 

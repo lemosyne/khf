@@ -3,6 +3,7 @@ use crate::{
     topology::Topology,
 };
 use hasher::Hasher;
+use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{fmt, marker::PhantomData};
@@ -26,6 +27,15 @@ where
             key,
             phantoms: PhantomData,
         }
+    }
+
+    pub fn with_rng<R>(rng: &mut R) -> Self
+    where
+        R: RngCore + CryptoRng,
+    {
+        let mut key = [0; N];
+        rng.fill_bytes(&mut key);
+        Self::new(key)
     }
 
     pub fn with_pos(pos: Pos, key: Key<N>) -> Self {

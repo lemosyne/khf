@@ -1,34 +1,39 @@
 use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
 use embedded_io::blocking::{Read, Write};
 use hasher::Hasher;
-use kms::{KeyManagementScheme, Persist};
+use inachus::Persist;
+use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, collections::BTreeSet, fmt};
+use std::{cmp::Ordering, collections::HashSet, fmt};
 
 /// A keyed hash forest (`Khf`) is a data structure for secure key management built around keyed
 /// hash trees (`Kht`s). As a secure key management scheme, a `Khf` is not only capable of deriving
 /// keys, but also updating keys such that they cannot be rederived post-update. Updating a key is
 /// synonymous to revoking a key.
-pub struct Khf<R, H, const N: usize> {
-    // The public state of a `Khf`.
-    state: KhfState<H, N>,
-    // The CSPRNG used to generate random keys and roots.
-    rng: R,
-}
-
 #[derive(Deserialize, Serialize)]
-struct KhfState<H, const N: usize> {
+pub struct Khf<R, H, const N: usize> {
     // The topology of a `Khf`.
     topology: Topology,
     // Tracks updated keys.
-    updated_keys: BTreeSet<u64>,
+    updated_keys: HashSet<u64>,
     // The list of roots.
     #[serde(bound(serialize = "Node<H, N>: Serialize"))]
     #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
     roots: Vec<Node<H, N>>,
     // The number of keys a `Khf` currently provides.
     keys: u64,
+    // The CSPRNG used to generate random keys and roots.
+    #[serde(skip)]
+    rng: R,
+}
+
+/// A list of different mechanisms, or ways, to consolidate a `Khf`.
+pub enum Consolidation {
+    /// Fully consolidate a `Khf` to a single root.
+    Full,
+    /// Consolidate roots corresponding to a range of keys in a `Khf`.
+    Ranged { start: u64, end: u64 },
 }
 
 impl<R, H, const N: usize> Khf<R, H, N>
@@ -36,48 +41,69 @@ where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
-    /// Construct a new KHF using the given rng
-    pub fn new(rng: R, fanouts: &[u64]) -> Self {
+    /// Constructs a new `Khf`.
+    pub fn new(mut rng: R, fanouts: &[u64]) -> Self {
         Self {
-            state: KhfState {
-                topology: Topology::new(&fanouts),
-                updated_keys: BTreeSet::new(),
-                roots: vec![],
-                keys: 0,
-            },
+            topology: Topology::new(fanouts),
+            updated_keys: HashSet::new(),
+            roots: vec![Node::with_rng(&mut rng)],
+            keys: 0,
             rng,
         }
     }
 
-    /// Returns a key filled with bytes from the supplied CSPRNG.
-    fn random_key(rng: &mut R) -> Key<N> {
-        let mut key = [0; N];
-        rng.fill_bytes(&mut key);
-        key
-    }
-
-    /// Returns a root with a pseudorandom key.
-    fn random_root(rng: &mut R) -> Node<H, N> {
-        Node::new(Self::random_key(rng))
-    }
-
-    /// Returns the number of roots in the forest's root list.
+    /// Returns the number of roots in the `Khf`'s root list.
     pub fn fragmentation(&self) -> u64 {
-        self.state.roots.len() as u64
+        self.roots.len() as u64
     }
-}
 
-impl<H, const N: usize> KhfState<H, N>
-where
-    H: Hasher<N>,
-{
-    /// Returns `true` if the forest is consolidated.
-    fn is_consolidated(&self) -> bool {
+    /// Returns `true` if the `Khf` is consolidated.
+    pub fn is_consolidated(&self) -> bool {
         self.roots.len() == 1 && self.roots[0].pos == (0, 0)
     }
 
+    /// Consolidates the `Khf` and returns the affected keys.
+    pub fn consolidate(&mut self, mechanism: Consolidation) -> Vec<u64> {
+        match mechanism {
+            Consolidation::Full => self.consolidate_full(),
+            Consolidation::Ranged { start, end } => self.consolidate_ranged(start, end),
+        }
+    }
+
+    // Consolidates back into a single root.
+    fn consolidate_full(&mut self) -> Vec<u64> {
+        let affected = (0..self.keys).into_iter().collect();
+
+        // Restore the `Khf` back to a clean state.
+        self.updated_keys.clear();
+        self.roots = vec![Node::with_rng(&mut self.rng)];
+        self.keys = 0;
+
+        affected
+    }
+
+    // Consolidates the roots for a range of keys.
+    fn consolidate_ranged(&mut self, start: u64, end: u64) -> Vec<u64> {
+        let affected = (start..end).into_iter().collect();
+
+        // Make sure we cover the range of keys.
+        if self.keys < end {
+            self.append_key(end);
+        }
+
+        // "Update" the range of keys.
+        self.update_keys(start, end);
+
+        // The consolidated range of keys shouldn't be considered as updated.
+        for key in &affected {
+            self.updated_keys.remove(key);
+        }
+
+        affected
+    }
+
     /// Appends a key, deriving it from the root for appended keys.
-    fn append_key(&mut self, root: Node<H, N>, key: u64) -> Key<N> {
+    fn append_key(&mut self, key: u64) -> Key<N> {
         // No need to append additional roots the forest is already consolidated.
         if self.is_consolidated() {
             self.keys = self.keys.max(key);
@@ -98,6 +124,8 @@ where
         // (2,0) (2,1) (2,2) (2,3)
         //
         // Doing this will allow us to append more keys later by simply adding L1 roots.
+        // The roots will be derived from a new, random root.
+        let root = Node::with_rng(&mut self.rng);
         let needed = self.topology.descendants(1) - (self.keys % self.topology.descendants(1));
         self.roots
             .append(&mut root.coverage(&self.topology, self.keys, self.keys + needed));
@@ -133,7 +161,7 @@ where
     }
 
     /// Updates a range of keys using the forest's root for updated keys.
-    fn update_range(&mut self, root: Node<H, N>, start: u64, end: u64) {
+    fn update_keys(&mut self, start: u64, end: u64) {
         // Updates cause consolidated forests to fragment.
         if self.is_consolidated() {
             if self.keys == 0 {
@@ -161,8 +189,11 @@ where
             ));
         }
 
-        // Save roots before the first root affected by the update, then add the updated roots.
+        // Save roots before the first root affected by the update.
         roots.extend(&mut self.roots.drain(..update_start));
+
+        // Added updated roots derived from a new random root.
+        let root = Node::with_rng(&mut self.rng);
         updated.append(&mut root.coverage(&self.topology, start, end));
 
         // Find the last root affected by the update.
@@ -190,6 +221,7 @@ where
 
         // Update roots and number of keys.
         self.roots = roots;
+        self.updated_keys.extend(start..end);
         self.keys = self.topology.end(self.roots.last().unwrap().pos);
     }
 }
@@ -208,66 +240,51 @@ where
 
     fn derive(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
         // Two cases for key derivation:
-        //  2) The key needs to be appended.
-        //  3) The key already exists in the root list.
-        if key >= self.state.keys {
-            let root = Self::random_root(&mut self.rng);
-            Ok(self.state.append_key(root, key))
+        //  1) The key needs to be appended.
+        //  2) The key already exists in the root list.
+        if key >= self.keys {
+            Ok(self.append_key(key))
         } else {
-            Ok(self.state.derive_key(key))
+            Ok(self.derive_key(key))
         }
     }
 
     fn update(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
         // Append the key if we don't cover it yet.
-        if key >= self.state.keys {
-            let root = Self::random_root(&mut self.rng);
-            self.state.append_key(root, key);
+        if key >= self.keys {
+            self.append_key(key);
         }
 
         // It's a pity that we must fragment the tree here for security.
-        let root = Self::random_root(&mut self.rng);
-        self.state.update_range(root, key, key + 1);
+        self.update_keys(key, key + 1);
 
-        // Mark key as updated and return it.
-        self.state.updated_keys.insert(key);
-        Ok(self.state.derive_key(key))
+        Ok(self.derive_key(key))
     }
 
     fn commit(&mut self) -> Vec<Self::KeyId> {
-        let updated = self.state.updated_keys.clone();
-        self.state.updated_keys.clear();
+        let updated = self.updated_keys.clone();
+        self.updated_keys.clear();
         updated.into_iter().collect()
     }
 }
 
-impl<Io: Read + Write, R, H, const N: usize> Persist<Io> for Khf<R, H, N> {
+impl<Io: Read + Write, R, H, const N: usize> Persist<Io> for Khf<R, H, N>
+where
+    R: Default,
+{
     type Init = R;
 
     fn persist(&mut self, mut sink: Io) -> Result<(), Io::Error> {
-        // TODO: stream serialization
-        let ser = bincode::serialize(&self.state).unwrap();
+        // TODO: Stream serialization.
+        let ser = bincode::serialize(&self).unwrap();
         sink.write_all(&ser)
     }
 
-    fn load(rng: Self::Init, mut source: Io) -> Result<Self, Io::Error> {
+    fn load(mut source: Io) -> Result<Self, Io::Error> {
+        // TODO: Stream deserialization.
         let mut raw = vec![];
-        loop {
-            let mut block = [0; 0x4000];
-            let n = source.read(&mut block)?;
-
-            if n == 0 {
-                break;
-            }
-
-            raw.extend(&block[..n]);
-        }
-
-        // TODO: stream serialization
-        Ok(Khf {
-            state: bincode::deserialize(&raw).unwrap(),
-            rng,
-        })
+        source.read_to_end(&mut raw)?;
+        Ok(bincode::deserialize(&raw).unwrap())
     }
 }
 
@@ -276,9 +293,9 @@ where
     H: Hasher<N>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, root) in self.state.roots.iter().enumerate() {
-            root.fmt(f, &self.state.topology)?;
-            if i + 1 != self.state.roots.len() {
+        for (i, root) in self.roots.iter().enumerate() {
+            root.fmt(f, &self.topology)?;
+            if i + 1 != self.roots.len() {
                 writeln!(f)?;
             }
         }

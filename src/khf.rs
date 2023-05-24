@@ -7,12 +7,26 @@ use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashSet, fmt};
 
+/// The default level for roots created when mutating a `Khf`.
+const DEFAULT_ROOT_LEVEL: u64 = 1;
+
 /// A keyed hash forest (`Khf`) is a data structure for secure key management built around keyed
 /// hash trees (`Kht`s). As a secure key management scheme, a `Khf` is not only capable of deriving
 /// keys, but also updating keys such that they cannot be rederived post-update. Updating a key is
 /// synonymous to revoking a key.
-#[derive(Deserialize, Serialize)]
 pub struct Khf<R, H, const N: usize> {
+    // The persistable state of a `Khf`.
+    state: State<H, N>,
+    // The CSPRNG used to generate random roots.
+    rng: R,
+}
+
+/// This is decoupled from the `Khf` struct purely because of the `rng` field. It doesn't make
+/// sense to require `rng` to be `Serialize`, and it's less flexible if we require `rng` to be
+/// `Default` to allow serialization to skip the `rng` field. Unfortunately, this makes the code
+/// quite ugly, since all field accesses (except for `rng`) needs to go through here.
+#[derive(Deserialize, Serialize)]
+struct State<H, const N: usize> {
     // The topology of a `Khf`.
     topology: Topology,
     // Tracks updated keys.
@@ -23,9 +37,6 @@ pub struct Khf<R, H, const N: usize> {
     roots: Vec<Node<H, N>>,
     // The number of keys a `Khf` currently provides.
     keys: u64,
-    // The CSPRNG used to generate random keys and roots.
-    #[serde(skip)]
-    rng: R,
 }
 
 /// A list of different mechanisms, or ways, to consolidate a `Khf`.
@@ -40,33 +51,32 @@ pub enum Consolidation {
     RangedLeveled { level: u64, start: u64, end: u64 },
 }
 
-/// The default level for roots created when mutating a `Khf`.
-const DEFAULT_ROOT_LEVEL: u64 = 1;
-
 impl<R, H, const N: usize> Khf<R, H, N>
 where
     R: RngCore + CryptoRng,
     H: Hasher<N>,
 {
     /// Constructs a new `Khf`.
-    pub fn new(mut rng: R, fanouts: &[u64]) -> Self {
+    pub fn new(fanouts: &[u64], mut rng: R) -> Self {
         Self {
-            topology: Topology::new(fanouts),
-            updated_keys: HashSet::new(),
-            roots: vec![Node::with_rng(&mut rng)],
-            keys: 0,
+            state: State {
+                topology: Topology::new(fanouts),
+                updated_keys: HashSet::new(),
+                roots: vec![Node::with_rng(&mut rng)],
+                keys: 0,
+            },
             rng,
         }
     }
 
     /// Returns the number of roots in the `Khf`'s root list.
     pub fn fragmentation(&self) -> u64 {
-        self.roots.len() as u64
+        self.state.roots.len() as u64
     }
 
     /// Returns `true` if the `Khf` is consolidated.
     pub fn is_consolidated(&self) -> bool {
-        self.roots.len() == 1 && self.roots[0].pos == (0, 0)
+        self.state.roots.len() == 1 && self.state.roots[0].pos == (0, 0)
     }
 
     /// Consolidates the `Khf` and returns the affected keys.
@@ -88,11 +98,11 @@ where
 
     // Consolidates to roots of a certain level.
     fn consolidate_leveled(&mut self, level: u64) -> Vec<u64> {
-        let affected = (0..self.keys).into_iter().collect();
+        let affected = (0..self.state.keys).into_iter().collect();
 
         // Unmark keys as updated and update the whole range of keys.
-        self.updated_keys.clear();
-        self.update_keys(level, 0, self.keys);
+        self.state.updated_keys.clear();
+        self.update_keys(level, 0, self.state.keys);
 
         affected
     }
@@ -107,7 +117,7 @@ where
         let affected = (start..end).into_iter().collect();
 
         // Make sure we cover the range of keys.
-        if self.keys < end {
+        if self.state.keys < end {
             self.append_key(level, end);
         }
 
@@ -116,7 +126,7 @@ where
 
         // The consolidated range of keys shouldn't be considered as updated.
         for key in &affected {
-            self.updated_keys.remove(key);
+            self.state.updated_keys.remove(key);
         }
 
         affected
@@ -126,8 +136,9 @@ where
     fn append_key(&mut self, level: u64, key: u64) -> Key<N> {
         // No need to append additional roots the forest is already consolidated.
         if self.is_consolidated() {
-            self.keys = self.keys.max(key);
-            return self.roots[0].derive(&self.topology, self.topology.leaf_position(key));
+            self.state.keys = self.state.keys.max(key);
+            return self.state.roots[0]
+                .derive(&self.state.topology, self.state.topology.leaf_position(key));
         }
 
         // First, add any roots needed to reach a full root of the specified level.
@@ -146,21 +157,28 @@ where
         // This allows us to append more keys later by adding roots of the specified level.
         //
         // First, compute the number of keys needed to reach a full root of the specified level.
-        let needed =
-            self.topology.descendants(level) - (self.keys % self.topology.descendants(level));
-        self.keys += needed;
+        let needed = self.state.topology.descendants(level)
+            - (self.state.keys % self.state.topology.descendants(level));
+        self.state.keys += needed;
 
         // Then, add in the roots of the specified level (each derived from a random root).
         let root = Node::with_rng(&mut self.rng);
-        self.roots
-            .append(&mut root.coverage(&self.topology, level, self.keys, self.keys + needed));
+        self.state.roots.append(&mut root.coverage(
+            &self.state.topology,
+            level,
+            self.state.keys,
+            self.state.keys + needed,
+        ));
 
         // Add roots of the specified level until we have one that covers the desired key.
-        while self.keys < key {
-            let pos = (level, self.keys / self.topology.descendants(level));
-            let key = root.derive(&self.topology, pos);
-            self.roots.push(Node::with_pos(pos, key));
-            self.keys += self.topology.descendants(level);
+        while self.state.keys < key {
+            let pos = (
+                level,
+                self.state.keys / self.state.topology.descendants(level),
+            );
+            let key = root.derive(&self.state.topology, pos);
+            self.state.roots.push(Node::with_pos(pos, key));
+            self.state.keys += self.state.topology.descendants(level);
         }
 
         self.derive_key(key)
@@ -168,38 +186,40 @@ where
 
     /// Derives a key from an existing root in the root list.
     fn derive_key(&mut self, key: u64) -> Key<N> {
-        let pos = self.topology.leaf_position(key);
+        let pos = self.state.topology.leaf_position(key);
         let index = self
+            .state
             .roots
             .binary_search_by(|root| {
-                if self.topology.is_ancestor(root.pos, pos) {
+                if self.state.topology.is_ancestor(root.pos, pos) {
                     Ordering::Equal
-                } else if self.topology.end(root.pos) <= self.topology.start(pos) {
+                } else if self.state.topology.end(root.pos) <= self.state.topology.start(pos) {
                     Ordering::Less
                 } else {
                     Ordering::Greater
                 }
             })
             .unwrap();
-        self.roots[index].derive(&self.topology, pos)
+        self.state.roots[index].derive(&self.state.topology, pos)
     }
 
     /// Updates a range of keys using the forest's root for updated keys.
     fn update_keys(&mut self, level: u64, start: u64, end: u64) {
         // Level 0 means consolidating to a single root.
         if level == 0 {
-            self.roots = vec![Node::with_rng(&mut self.rng)];
-            self.keys = end;
-            self.updated_keys.extend(start..end);
+            self.state.roots = vec![Node::with_rng(&mut self.rng)];
+            self.state.keys = end;
+            self.state.updated_keys.extend(start..end);
             return;
         }
 
         // Updates cause consolidated forests to fragment.
         if self.is_consolidated() {
-            if self.keys == 0 {
-                self.keys = end;
+            if self.state.keys == 0 {
+                self.state.keys = end;
             }
-            self.roots = self.roots[0].coverage(&self.topology, level, 0, self.keys);
+            self.state.roots =
+                self.state.roots[0].coverage(&self.state.topology, level, 0, self.state.keys);
         }
 
         // We need to create a new set of roots and store updated roots.
@@ -208,55 +228,65 @@ where
 
         // Find the first root affected by the update.
         let update_start = self
+            .state
             .roots
             .iter()
-            .position(|root| start < self.topology.end(root.pos))
-            .unwrap_or(self.roots.len() - 1);
-        let update_root = &self.roots[update_start];
-        if self.topology.start(update_root.pos) != start {
+            .position(|root| start < self.state.topology.end(root.pos))
+            .unwrap_or(self.state.roots.len() - 1);
+        let update_root = &self.state.roots[update_start];
+        if self.state.topology.start(update_root.pos) != start {
             updated.append(&mut update_root.coverage(
-                &self.topology,
+                &self.state.topology,
                 level,
-                self.topology.start(update_root.pos),
+                self.state.topology.start(update_root.pos),
                 start,
             ));
         }
 
         // Save roots before the first root affected by the update.
-        roots.extend(&mut self.roots.drain(..update_start));
+        roots.extend(&mut self.state.roots.drain(..update_start));
 
         // Added updated roots derived from a new random root.
         let root = Node::with_rng(&mut self.rng);
-        updated.append(&mut root.coverage(&self.topology, level, start, end));
+        updated.append(&mut root.coverage(&self.state.topology, level, start, end));
 
         // Find the last root affected by the update.
-        let mut update_end = self.roots.len();
-        if end < self.topology.end(self.roots[self.roots.len() - 1].pos) {
+        let mut update_end = self.state.roots.len();
+        if end
+            < self
+                .state
+                .topology
+                .end(self.state.roots[self.state.roots.len() - 1].pos)
+        {
             update_end = self
+                .state
                 .roots
                 .iter()
-                .position(|root| end <= self.topology.end(root.pos))
-                .unwrap_or(self.roots.len())
+                .position(|root| end <= self.state.topology.end(root.pos))
+                .unwrap_or(self.state.roots.len())
                 + 1;
-            let update_root = &self.roots[update_end - 1];
-            if self.topology.end(update_root.pos) != end {
+            let update_root = &self.state.roots[update_end - 1];
+            if self.state.topology.end(update_root.pos) != end {
                 updated.append(&mut update_root.coverage(
-                    &self.topology,
+                    &self.state.topology,
                     level,
                     end,
-                    self.topology.end(update_root.pos),
+                    self.state.topology.end(update_root.pos),
                 ));
             }
         }
 
         // Save the updated roots and add any remaining roots.
         roots.append(&mut updated);
-        roots.extend(&mut self.roots.drain(update_end..));
+        roots.extend(&mut self.state.roots.drain(update_end..));
 
         // Update roots and number of keys.
-        self.roots = roots;
-        self.keys = self.topology.end(self.roots.last().unwrap().pos);
-        self.updated_keys.extend(start..end);
+        self.state.roots = roots;
+        self.state.keys = self
+            .state
+            .topology
+            .end(self.state.roots.last().unwrap().pos);
+        self.state.updated_keys.extend(start..end);
     }
 }
 
@@ -276,7 +306,7 @@ where
         // Two cases for key derivation:
         //  1) The key needs to be appended.
         //  2) The key already exists in the root list.
-        if key >= self.keys {
+        if key >= self.state.keys {
             Ok(self.append_key(DEFAULT_ROOT_LEVEL, key))
         } else {
             Ok(self.derive_key(key))
@@ -285,7 +315,7 @@ where
 
     fn update(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
         // Append the key if we don't cover it yet.
-        if key >= self.keys {
+        if key >= self.state.keys {
             self.append_key(DEFAULT_ROOT_LEVEL, key);
         }
 
@@ -296,25 +326,33 @@ where
     }
 
     fn commit(&mut self) -> Vec<Self::KeyId> {
-        self.updated_keys.drain().collect()
+        self.state.updated_keys.drain().collect()
     }
 }
 
-impl<Io: Read + Write, R: Default, H, const N: usize> Persist<Io> for Khf<R, H, N> {
-    type Init = ();
+impl<Io, R, H, const N: usize> Persist<Io> for Khf<R, H, N>
+where
+    Io: Read + Write,
+{
+    type Init = R;
     type Error = Error;
 
     fn persist(&mut self, mut sink: Io) -> Result<(), Self::Error> {
         // TODO: Stream serialization.
-        let ser = bincode::serialize(&self).unwrap();
+        let ser = bincode::serialize(&self.state)?;
         sink.write_all(&ser).map_err(|_| Error::Io)
     }
 
-    fn load(_: Self::Init, mut source: Io) -> Result<Self, Self::Error> {
+    fn load(rng: Self::Init, mut source: Io) -> Result<Self, Self::Error> {
         // TODO: Stream deserialization.
         let mut raw = vec![];
         source.read_to_end(&mut raw).map_err(|_| Error::Io)?;
-        Ok(bincode::deserialize(&raw).unwrap())
+        Ok({
+            Self {
+                state: bincode::deserialize(&raw)?,
+                rng,
+            }
+        })
     }
 }
 
@@ -323,9 +361,9 @@ where
     H: Hasher<N>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, root) in self.roots.iter().enumerate() {
-            root.fmt(f, &self.topology)?;
-            if i + 1 != self.roots.len() {
+        for (i, root) in self.state.roots.iter().enumerate() {
+            root.fmt(f, &self.state.topology)?;
+            if i + 1 != self.state.roots.len() {
                 writeln!(f)?;
             }
         }

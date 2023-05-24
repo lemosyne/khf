@@ -16,6 +16,8 @@ use app::App;
 
 pub mod command;
 
+type DefaultKhf = Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>;
+
 #[derive(Parser)]
 struct Args {
     /// The fanout list defining the topology of the interactive forest.
@@ -26,8 +28,7 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let forest =
-        Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::new(ThreadRng::default(), &args.fanouts);
+    let forest = DefaultKhf::new(&args.fanouts, ThreadRng::default());
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();

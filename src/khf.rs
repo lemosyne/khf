@@ -124,11 +124,16 @@ where
 
     /// Appends a key, appending roots as necessary from the specified level.
     fn append_key(&mut self, level: u64, key: u64) -> Key<N> {
-        // No need to append additional roots the forest is already consolidated.
+        // No need to append additional roots if the forest is already consolidated.
         if self.is_consolidated() {
-            self.keys = self.keys.max(key);
+            self.keys = self.keys.max(key + 1);
             return self.roots[0].derive(&self.topology, self.topology.leaf_position(key));
         }
+
+        let root = Node::with_rng(&mut self.rng);
+        self.roots
+            .append(&mut root.coverage(&self.topology, level, self.keys, key + 1));
+        self.keys = self.keys.max(key + 1);
 
         // First, add any roots needed to reach a full root of the specified level.
         // For example: assume a topology of [4], a target of L1, and the following roots:
@@ -146,22 +151,22 @@ where
         // This allows us to append more keys later by adding roots of the specified level.
         //
         // First, compute the number of keys needed to reach a full root of the specified level.
-        let needed =
-            self.topology.descendants(level) - (self.keys % self.topology.descendants(level));
-        self.keys += needed;
+        // let needed =
+        //     self.topology.descendants(level) - (self.keys % self.topology.descendants(level));
+        // self.keys += needed;
 
-        // Then, add in the roots of the specified level (each derived from a random root).
-        let root = Node::with_rng(&mut self.rng);
-        self.roots
-            .append(&mut root.coverage(&self.topology, level, self.keys, self.keys + needed));
+        // // Then, add in the roots of the specified level (each derived from a random root).
+        // let root = Node::with_rng(&mut self.rng);
+        // self.roots
+        //     .append(&mut root.coverage(&self.topology, level, self.keys, self.keys + needed));
 
-        // Add roots of the specified level until we have one that covers the desired key.
-        while self.keys < key {
-            let pos = (level, self.keys / self.topology.descendants(level));
-            let key = root.derive(&self.topology, pos);
-            self.roots.push(Node::with_pos(pos, key));
-            self.keys += self.topology.descendants(level);
-        }
+        // // Add roots of the specified level until we have one that covers the desired key.
+        // while self.keys < key {
+        //     let pos = (level, self.keys / self.topology.descendants(level));
+        //     let key = root.derive(&self.topology, pos);
+        //     self.roots.push(Node::with_pos(pos, key));
+        //     self.keys += self.topology.descendants(level);
+        // }
 
         self.derive_key(key)
     }
@@ -196,9 +201,7 @@ where
 
         // Updates cause consolidated forests to fragment.
         if self.is_consolidated() {
-            if self.keys == 0 {
-                self.keys = end;
-            }
+            self.keys = self.keys.max(end);
             self.roots = self.roots[0].coverage(&self.topology, level, 0, self.keys);
         }
 
@@ -333,5 +336,20 @@ where
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hasher::openssl::*;
+    use rand::rngs::ThreadRng;
+
+    #[test]
+    fn it_works() {
+        let mut khf =
+            Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::new(&[2, 2], ThreadRng::default());
+        let key = khf.update(0);
+        let key = khf.derive(1);
     }
 }

@@ -1,8 +1,8 @@
 use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
 use embedded_io::blocking::{Read, Write};
 use hasher::Hasher;
-use inachus::Persist;
 use kms::KeyManagementScheme;
+use persistence::Persist;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashSet, fmt};

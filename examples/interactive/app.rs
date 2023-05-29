@@ -64,6 +64,9 @@ where
                                 self.history.clear();
                                 continue;
                             }
+                            Command::Truncate(keys) => {
+                                self.forest.truncate(keys);
+                            }
                             Command::Invalid => {}
                         }
                         self.history.push(command);

@@ -15,6 +15,7 @@ pub enum Command {
     Commit,
     Invalid,
     Clear,
+    Truncate(u64),
 }
 
 impl FromStr for Command {
@@ -25,7 +26,7 @@ impl FromStr for Command {
 }
 
 pub fn parse_cmd(input: &str) -> IResult<&str, Command> {
-    alt((derive_cmd, update_cmd, commit_cmd, clear_cmd))(input)
+    alt((derive_cmd, update_cmd, commit_cmd, clear_cmd, truncate_cmd))(input)
 }
 
 fn derive_cmd(input: &str) -> IResult<&str, Command> {
@@ -64,4 +65,17 @@ fn clear_cmd(input: &str) -> IResult<&str, Command> {
     map(delimited(multispace0, tag("clear"), multispace0), |_| {
         Command::Clear
     })(input)
+}
+
+fn truncate_cmd(input: &str) -> IResult<&str, Command> {
+    map(
+        tuple((
+            multispace0,
+            tag("truncate"),
+            multispace0,
+            map_res(is_not(" \t"), |key| u64::from_str(key)),
+            multispace0,
+        )),
+        |(_, _, _, keys, _)| Command::Truncate(keys),
+    )(input)
 }

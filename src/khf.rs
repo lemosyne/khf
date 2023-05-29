@@ -122,6 +122,38 @@ where
         affected
     }
 
+    /// Truncates the `Khf` so it only covers a specified number of keys.
+    pub fn truncate(&mut self, keys: u64) {
+        // Mark new number of keys if consolidated and we already cover some keys.
+        if self.is_consolidated() {
+            if self.keys > 0 && keys < self.keys {
+                self.keys = keys;
+                self.roots =
+                    self.roots[0].coverage(&self.topology, DEFAULT_ROOT_LEVEL, 0, self.keys);
+            }
+            return;
+        }
+
+        // Can't truncate to a larger amount of keys.
+        if keys >= self.keys {
+            return;
+        }
+
+        // TODO: is there a better way to find this?
+        let index = self
+            .roots
+            .iter()
+            .position(|root| self.topology.end(root.pos) > keys)
+            .unwrap();
+        let start = self.topology.start(self.roots[index].pos);
+        let root = self.roots.drain(index..).next().unwrap();
+
+        // Update keys and roots.
+        self.keys = keys;
+        self.roots
+            .append(&mut root.coverage(&self.topology, DEFAULT_ROOT_LEVEL, start, keys))
+    }
+
     /// Appends a key, appending roots as necessary from the specified level.
     fn append_key(&mut self, level: u64, key: u64) -> Key<N> {
         // No need to append additional roots if the forest is already consolidated.

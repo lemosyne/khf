@@ -9,12 +9,23 @@ use serde_with::serde_as;
 use std::{fmt, marker::PhantomData};
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct Node<H, const N: usize> {
     pub pos: Pos,
     #[serde_as(as = "[_; N]")]
     pub key: Key<N>,
-    phantoms: PhantomData<H>,
+    pd: PhantomData<H>,
+}
+
+// Manually implemented to avoid restrictive bounds on `H`.
+impl<H, const N: usize> Clone for Node<H, N> {
+    fn clone(&self) -> Self {
+        Self {
+            pos: self.pos,
+            key: self.key,
+            pd: PhantomData,
+        }
+    }
 }
 
 impl<H, const N: usize> Node<H, N>
@@ -25,7 +36,7 @@ where
         Self {
             pos: (0, 0),
             key,
-            phantoms: PhantomData,
+            pd: PhantomData,
         }
     }
 
@@ -42,7 +53,7 @@ where
         Self {
             pos,
             key,
-            phantoms: PhantomData,
+            pd: PhantomData,
         }
     }
 
@@ -66,7 +77,7 @@ where
             .map(|pos| Self {
                 pos,
                 key: self.derive(topology, pos),
-                phantoms: PhantomData,
+                pd: PhantomData,
             })
             .collect()
     }

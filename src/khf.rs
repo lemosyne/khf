@@ -14,7 +14,7 @@ const DEFAULT_ROOT_LEVEL: u64 = 1;
 /// hash trees (`Kht`s). As a secure key management scheme, a `Khf` is not only capable of deriving
 /// keys, but also updating keys such that they cannot be rederived post-update. Updating a key is
 /// synonymous to revoking a key.
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize)]
 pub struct Khf<R, H, const N: usize> {
     // The topology of a `Khf`.
     topology: Topology,
@@ -31,6 +31,22 @@ pub struct Khf<R, H, const N: usize> {
     rng: R,
 }
 
+// Manually implemented to avoid restrictive bounds on `H`.
+impl<R, H, const N: usize> Clone for Khf<R, H, N>
+where
+    R: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            topology: self.topology.clone(),
+            updated_keys: self.updated_keys.clone(),
+            roots: self.roots.clone(),
+            keys: self.keys,
+            rng: self.rng.clone(),
+        }
+    }
+}
+
 /// A list of different mechanisms, or ways, to consolidate a `Khf`.
 pub enum Consolidation {
     /// Consolidate a `Khf` to a single root.
@@ -45,7 +61,7 @@ pub enum Consolidation {
 
 impl<R, H, const N: usize> Khf<R, H, N>
 where
-    R: RngCore + CryptoRng,
+    R: RngCore + CryptoRng + Clone,
     H: Hasher<N>,
 {
     /// Constructs a new `Khf`.
@@ -55,7 +71,7 @@ where
             updated_keys: HashSet::new(),
             roots: vec![Node::with_rng(&mut rng)],
             keys: 0,
-            rng,
+            rng: rng.clone(),
         }
     }
 
@@ -297,7 +313,7 @@ where
 
 impl<'a, 'b, R, H, const N: usize> KeyManagementScheme for Khf<R, H, N>
 where
-    R: RngCore + CryptoRng,
+    R: RngCore + CryptoRng + Clone,
     H: Hasher<N>,
 {
     /// Keys have the same size as the hash digest size.

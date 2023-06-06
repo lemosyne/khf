@@ -25,7 +25,7 @@ pub struct App<R, H, const N: usize> {
 
 impl<R, H, const N: usize> App<R, H, N>
 where
-    R: RngCore + CryptoRng,
+    R: RngCore + CryptoRng + Clone,
     H: Hasher<N>,
 {
     pub fn new(forest: Khf<R, H, N>) -> Self {

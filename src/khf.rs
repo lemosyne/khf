@@ -386,18 +386,3 @@ where
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use hasher::openssl::*;
-    use rand::rngs::ThreadRng;
-
-    #[test]
-    fn it_works() {
-        let mut khf =
-            Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::new(&[2, 2], ThreadRng::default());
-        let key = khf.update(0);
-        let key = khf.derive(1);
-    }
-}

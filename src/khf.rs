@@ -14,7 +14,7 @@ const DEFAULT_ROOT_LEVEL: u64 = 1;
 /// hash trees (`Kht`s). As a secure key management scheme, a `Khf` is not only capable of deriving
 /// keys, but also updating keys such that they cannot be rederived post-update. Updating a key is
 /// synonymous to revoking a key.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct Khf<R, H, const N: usize> {
     // The topology of a `Khf`.
     topology: Topology,

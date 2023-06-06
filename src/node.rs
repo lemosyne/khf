@@ -9,7 +9,7 @@ use serde_with::serde_as;
 use std::{fmt, marker::PhantomData};
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Node<H, const N: usize> {
     pub pos: Pos,
     #[serde_as(as = "[_; N]")]

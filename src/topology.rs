@@ -1,7 +1,7 @@
 use crate::aliases::Pos;
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct Topology {
     descendants: Vec<u64>,
 }

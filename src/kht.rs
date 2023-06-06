@@ -2,6 +2,7 @@ use crate::{aliases::Key, node::Node, topology::Topology};
 use hasher::Hasher;
 use std::fmt;
 
+#[derive(Clone)]
 pub struct Kht<H, const N: usize> {
     root: Node<H, N>,
     topology: Topology,

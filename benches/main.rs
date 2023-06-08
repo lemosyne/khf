@@ -7,4 +7,5 @@ criterion_main! {
     benchmarks::derivation::benches,
     benchmarks::persist::benches,
     benchmarks::width::benches,
+    benchmarks::heterogeneity::benches,
 }

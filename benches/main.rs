@@ -1,13 +1,10 @@
 use criterion::criterion_main;
 
-pub mod depth;
-pub mod derivation;
-pub mod persist;
-pub mod width;
+mod benchmarks;
 
 criterion_main! {
-    depth::benches,
-    derivation::benches,
-    persist::benches,
-    width::benches,
+    benchmarks::depth::benches,
+    benchmarks::derivation::benches,
+    benchmarks::persist::benches,
+    benchmarks::width::benches,
 }

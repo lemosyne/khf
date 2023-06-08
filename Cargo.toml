@@ -20,13 +20,16 @@ anyhow = "1.0.58"
 clap = { version = "4.2.2", features = ["derive"] }
 criterion = { version = "0.5.1", features = ["html_reports"] }
 crossterm = "0.23"
+embedded-io = { git = "https://github.com/euugenechou/embedded-io.git", features = ["std"] }
 hasher = { git = "https://github.com/lemosyne/hasher.git", features = ["openssl"] }
 itertools = "0.10.5"
 nom = "7.1.3"
+persistence = { git = "https://github.com/lemosyne/persistence.git" }
 rand = "0.8.5"
+tempfile = "3.6.0"
 tui = "0.18.0"
 unicode-width = "0.1"
 
 [[bench]]
-name = "bench_main"
+name = "main"
 harness = false

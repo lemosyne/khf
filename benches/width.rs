@@ -1,4 +1,4 @@
-//! This benchmark aims to compare the rate of fragmentation between `Khf`s with different depths.
+//! This benchmark aims to compare the rate of fragmentation between `Khf`s with different widths.
 
 use criterion::{criterion_group, Criterion};
 use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
@@ -6,15 +6,8 @@ use khf::{Consolidation, Khf};
 use kms::KeyManagementScheme;
 use rand::rngs::ThreadRng;
 
-// Descendants per level:
-//  L1: 16384
-//  L2: 4096
-//  L3: 256
-//  L4: 64
-//  L5: 16
-//  L6: 4
-const FANOUTS: &[u64] = &[4, 4, 4, 4, 4, 4, 4];
-
+const WIDTHS: &[u64] = &[2, 4, 8, 16, 32];
+const DEPTH: usize = 3;
 const KEYS: usize = 32768;
 
 struct TestCase {
@@ -23,14 +16,15 @@ struct TestCase {
 }
 
 fn setup() -> Vec<TestCase> {
-    (1..FANOUTS.len())
-        .map(|i| {
-            let mut forest = Khf::new(&FANOUTS[..i], ThreadRng::default());
+    WIDTHS
+        .iter()
+        .map(|width| {
+            let mut forest = Khf::new(&vec![*width; DEPTH], ThreadRng::default());
 
             forest.derive(KEYS as u64 - 1).unwrap();
 
             TestCase {
-                name: format!("{:?}", &FANOUTS[..i]),
+                name: format!("{:?}", vec![width; DEPTH]),
                 forest,
             }
         })
@@ -39,7 +33,7 @@ fn setup() -> Vec<TestCase> {
 
 fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!(
-        "Fragmentation Rate With Variable Depth ({KEYS} keys)"
+        "Fragmentation Rate With Variable Width ({KEYS} keys)"
     ));
 
     for test in setup().iter_mut() {

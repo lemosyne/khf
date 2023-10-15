@@ -244,12 +244,18 @@ where
 
     /// Derives a key.
     fn derive_key(&mut self, key: u64) -> Key<N> {
+        let pos = self.topology.leaf_position(key);
+
+        // We may have updated this key.
+        if self.updated_keys.contains(&key) {
+            return self.updating_root.derive(&self.topology, pos);
+        }
+
         // Append the key if we don't cover it yet.
         if key >= self.keys {
             return self.append_key(DEFAULT_ROOT_LEVEL, key);
         }
 
-        let pos = self.topology.leaf_position(key);
         let index = self
             .roots
             .binary_search_by(|root| {
@@ -506,8 +512,10 @@ mod tests {
         // We can update a key we don't yet cover and still derive appended keys in between.
         // 0 1 2 3 4 5 [6 7] [[8 9] [10 11]] [[12 13] [14 15]]
         let key15 = khf.update(15)?;
+        let key15_derived = khf.derive(15)?;
         let key13 = khf.derive(13)?;
         assert_eq!(khf.keys, 16);
+        assert_eq!(key15, key15_derived);
         assert_eq!(khf.fragmentation(), 9);
 
         // Committing should yield the one update key.

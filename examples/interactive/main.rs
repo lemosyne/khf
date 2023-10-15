@@ -21,7 +21,7 @@ type DefaultKhf = Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>;
 #[derive(Parser)]
 struct Args {
     /// The fanout list defining the topology of the interactive forest.
-    #[arg(short, long, value_delimiter = ',', default_values_t = [2, 2, 2, 2])]
+    #[arg(short, long, value_delimiter = ',', default_values_t = [2, 2])]
     fanouts: Vec<u64>,
 }
 

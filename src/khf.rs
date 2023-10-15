@@ -5,7 +5,7 @@ use kms::KeyManagementScheme;
 use persistence::Persist;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, collections::HashSet, fmt};
+use std::{cmp::Ordering, collections::BTreeSet, fmt};
 
 /// The default level for roots created when mutating a `Khf`.
 const DEFAULT_ROOT_LEVEL: u64 = 1;
@@ -18,14 +18,22 @@ const DEFAULT_ROOT_LEVEL: u64 = 1;
 pub struct Khf<R, H, const N: usize> {
     // The topology of a `Khf`.
     topology: Topology,
+    // Root that appended keys are derived from.
+    #[serde(bound(serialize = "Node<H, N>: Serialize"))]
+    #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
+    appending_root: Node<H, N>,
+    // Root that updated keys are derived from.
+    #[serde(bound(serialize = "Node<H, N>: Serialize"))]
+    #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
+    updating_root: Node<H, N>,
     // Tracks updated keys.
-    updated_keys: HashSet<u64>,
+    updated_keys: BTreeSet<u64>,
     // The list of roots.
     #[serde(bound(serialize = "Node<H, N>: Serialize"))]
     #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
     roots: Vec<Node<H, N>>,
     // The number of keys a `Khf` currently provides.
-    keys: u64,
+    pub(crate) keys: u64,
     // The CSPRNG used to generate random roots.
     #[serde(skip)]
     rng: R,
@@ -39,6 +47,8 @@ where
     fn clone(&self) -> Self {
         Self {
             topology: self.topology.clone(),
+            appending_root: self.appending_root.clone(),
+            updating_root: self.updating_root.clone(),
             updated_keys: self.updated_keys.clone(),
             roots: self.roots.clone(),
             keys: self.keys,
@@ -68,7 +78,9 @@ where
     pub fn new(fanouts: &[u64], mut rng: R) -> Self {
         Self {
             topology: Topology::new(fanouts),
-            updated_keys: HashSet::new(),
+            appending_root: Node::with_rng(&mut rng),
+            updating_root: Node::with_rng(&mut rng),
+            updated_keys: BTreeSet::new(),
             roots: vec![Node::with_rng(&mut rng)],
             keys: 0,
             rng: rng.clone(),
@@ -140,6 +152,11 @@ where
 
     /// Truncates the `Khf` so it only covers a specified number of keys.
     pub fn truncate(&mut self, keys: u64) {
+        // Commit any pending changes before we truncate.
+        if !self.updated_keys.is_empty() {
+            self.commit();
+        }
+
         // Mark new number of keys if consolidated and we already cover some keys.
         if self.is_consolidated() {
             if self.keys > 0 && keys < self.keys {
@@ -178,9 +195,15 @@ where
             return self.roots[0].derive(&self.topology, self.topology.leaf_position(key));
         }
 
-        let root = Node::with_rng(&mut self.rng);
-        self.roots
-            .append(&mut root.coverage(&self.topology, level, self.keys, key + 1));
+        // Append new roots to cover appended keys.
+        self.roots.append(&mut self.appending_root.coverage(
+            &self.topology,
+            level,
+            self.keys,
+            key + 1,
+        ));
+
+        // Update the number of keys.
         self.keys = self.keys.max(key + 1);
 
         // First, add any roots needed to reach a full root of the specified level.
@@ -219,8 +242,13 @@ where
         self.derive_key(key)
     }
 
-    /// Derives a key from an existing root in the root list.
+    /// Derives a key.
     fn derive_key(&mut self, key: u64) -> Key<N> {
+        // Append the key if we don't cover it yet.
+        if key >= self.keys {
+            return self.append_key(DEFAULT_ROOT_LEVEL, key);
+        }
+
         let pos = self.topology.leaf_position(key);
         let index = self
             .roots
@@ -235,6 +263,35 @@ where
             })
             .unwrap();
         self.roots[index].derive(&self.topology, pos)
+    }
+
+    fn updated_key_ranges(&self) -> Vec<(u64, u64)> {
+        if self.updated_keys.is_empty() {
+            return Vec::new();
+        }
+
+        let mut ranges = Vec::new();
+        let mut first = true;
+        let mut start = 0;
+        let mut prev = 0;
+        let mut leaves = 1;
+
+        for leaf in &self.updated_keys {
+            if first {
+                first = false;
+                start = *leaf;
+            } else if *leaf == prev + 1 {
+                leaves += 1;
+            } else {
+                ranges.push((start, start + leaves));
+                leaves = 1;
+                start = *leaf;
+            }
+            prev = *leaf;
+        }
+
+        ranges.push((start, start + leaves));
+        ranges
     }
 
     /// Updates a range of keys using the forest's root for updated keys.
@@ -276,9 +333,12 @@ where
         // Save roots before the first root affected by the update.
         roots.extend(&mut self.roots.drain(..update_start));
 
-        // Added updated roots derived from a new random root.
-        let root = Node::with_rng(&mut self.rng);
-        updated.append(&mut root.coverage(&self.topology, level, start, end));
+        // Add updated roots derived from the updating root.
+        updated.append(
+            &mut self
+                .updating_root
+                .coverage(&self.topology, level, start, end),
+        );
 
         // Find the last root affected by the update.
         let mut update_end = self.roots.len();
@@ -324,30 +384,40 @@ where
     type Error = Error;
 
     fn derive(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        // Two cases for key derivation:
-        //  1) The key needs to be appended.
-        //  2) The key already exists in the root list.
-        if key >= self.keys {
-            Ok(self.append_key(DEFAULT_ROOT_LEVEL, key))
-        } else {
-            Ok(self.derive_key(key))
-        }
+        Ok(self.derive_key(key))
     }
 
     fn update(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        // Append the key if we don't cover it yet.
+        // It's possible that we update a key that isn't yet in our root list, so we first append
+        // it to ensure that we will still have a valid root list.
         if key >= self.keys {
             self.append_key(DEFAULT_ROOT_LEVEL, key);
         }
 
-        // It's a pity that we must fragment the tree here for security.
-        self.update_keys(DEFAULT_ROOT_LEVEL, key, key + 1);
-
-        Ok(self.derive_key(key))
+        // We delay the fragmentation of the `Khf` until it is committed. This assumes that the
+        // resultant key is properly used (i.e., with a unique nonce).
+        self.keys = self.keys.max(key + 1);
+        self.updated_keys.insert(key);
+        Ok(self
+            .updating_root
+            .derive(&self.topology, self.topology.leaf_position(key)))
     }
 
     fn commit(&mut self) -> Vec<Self::KeyId> {
-        self.updated_keys.drain().collect()
+        let mut updated_keys = vec![];
+
+        // Update keys in each of the updated key ranges.
+        for (start, end) in self.updated_key_ranges() {
+            self.update_keys(DEFAULT_ROOT_LEVEL, start, end);
+            updated_keys.extend(start..end);
+        }
+
+        // Clear updated keys and get a new updating root and appending root.
+        self.updated_keys.clear();
+        self.updating_root = Node::with_rng(&mut self.rng);
+        self.appending_root = Node::with_rng(&mut self.rng);
+
+        updated_keys
     }
 }
 
@@ -383,6 +453,85 @@ where
                 writeln!(f)?;
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
+    use rand::{rngs::ThreadRng, thread_rng};
+
+    #[test]
+    fn it_works() -> Result<()> {
+        let mut khf = Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::new(&[2, 2], thread_rng());
+
+        // We start off with one root.
+        assert_eq!(khf.fragmentation(), 1);
+
+        // Deriving any key is strictly an append, so no additional fragmentation.
+        let key4 = khf.derive(4)?;
+        assert_eq!(khf.fragmentation(), 1);
+
+        // Updating keys won't cause fragmentation until commit.
+        let key1 = khf.update(1)?;
+        let key2 = khf.update(2)?;
+        assert_eq!(khf.fragmentation(), 1);
+
+        // Committing should yield the two updated keys.
+        assert_eq!(vec![1, 2], khf.commit());
+
+        // The `Khf` should be entirely fragmented now.
+        // This means we should have 5 roots since we have keys [0..4].
+        assert_eq!(khf.fragmentation(), 5);
+
+        // We should be able to derive the previously derived/updated keys.
+        let key1_updated = khf.derive(1)?;
+        let key2_updated = khf.derive(2)?;
+        let key4_rederived = khf.derive(4)?;
+        assert_eq!(key1, key1_updated);
+        assert_eq!(key2, key2_updated);
+        assert_eq!(key4, key4_rederived);
+
+        // Deriving appended keys now should cause fragmentation.
+        // 0 1 2 3 4 5 [6 7] [[8 9] [10 11]]
+        let key11 = khf.derive(11)?;
+        assert_eq!(khf.fragmentation(), 8);
+
+        // Committing should yield no keys.
+        assert!(khf.commit().is_empty());
+
+        // We can update a key we don't yet cover and still derive appended keys in between.
+        // 0 1 2 3 4 5 [6 7] [[8 9] [10 11]] [[12 13] [14 15]]
+        let key15 = khf.update(15)?;
+        let key13 = khf.derive(13)?;
+        assert_eq!(khf.keys, 16);
+        assert_eq!(khf.fragmentation(), 9);
+
+        // Committing should yield the one update key.
+        assert_eq!(vec![15], khf.commit());
+
+        // We can still derive the old stuff.
+        let key11_rederived = khf.derive(11)?;
+        let key13_rederived = khf.derive(13)?;
+        let key15_rederived = khf.derive(15)?;
+        assert_eq!(key11, key11_rederived);
+        assert_eq!(key13, key13_rederived);
+        assert_eq!(key15, key15_rederived);
+
+        // One more check on appending.
+        // 0 1 2 3 4 5 [6 7] [[8 9] [10 11]] [12 13] 14 15 16
+        let key16 = khf.derive(16)?;
+        assert_eq!(khf.fragmentation(), 12);
+
+        // Committing should yield no keys.
+        assert!(khf.commit().is_empty());
+
+        let key16_rederived = khf.derive(16)?;
+        assert_eq!(key16, key16_rederived);
+
         Ok(())
     }
 }

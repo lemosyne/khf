@@ -39,24 +39,6 @@ pub struct Khf<R, H, const N: usize> {
     rng: R,
 }
 
-// Manually implemented to avoid restrictive bounds on `H`.
-impl<R, H, const N: usize> Clone for Khf<R, H, N>
-where
-    R: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            topology: self.topology.clone(),
-            appending_root: self.appending_root.clone(),
-            updating_root: self.updating_root.clone(),
-            updated_keys: self.updated_keys.clone(),
-            roots: self.roots.clone(),
-            keys: self.keys,
-            rng: self.rng.clone(),
-        }
-    }
-}
-
 /// A list of different mechanisms, or ways, to consolidate a `Khf`.
 pub enum Consolidation {
     /// Consolidate a `Khf` to a single root.

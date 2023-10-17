@@ -79,6 +79,11 @@ where
         self.roots.len() == 1 && self.roots[0].pos == (0, 0)
     }
 
+    /// Returns the keys which have been updated since the last epoch
+    pub fn updated_keys(&self) -> &BTreeSet<u64> {
+        &self.updated_keys
+    }
+
     /// Consolidates the `Khf` and returns the affected keys.
     pub fn consolidate(&mut self, mechanism: Consolidation) -> Vec<u64> {
         match mechanism {

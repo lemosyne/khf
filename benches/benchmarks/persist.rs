@@ -25,28 +25,23 @@ const FANOUTS: &[u64] = &[4, 4, 4, 4, 4, 4, 4, 4];
 // 131072 keys means 2 L1 roots using the fanouts defined above.
 const KEYS: usize = 131072;
 
-struct TestCase {
+struct TestCase<F: FnMut() -> Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>> {
     name: String,
-    forest: Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+    forest: F,
 }
 
-fn setup() -> Vec<TestCase> {
-    let mut forest = Khf::new(FANOUTS, ThreadRng::default());
-
-    forest.derive(KEYS as u64 - 1).unwrap();
-
+fn setup() -> Vec<TestCase<impl FnMut() -> Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>>> {
     (0..FANOUTS.len())
-        .map(|level| {
-            let mut forest = forest.clone();
-
-            forest.consolidate(Consolidation::Leveled {
-                level: level as u64,
-            });
-
-            TestCase {
-                name: format!("L{level} consolidation"),
-                forest,
-            }
+        .map(|level| TestCase {
+            name: format!("L{level} consolidation"),
+            forest: move || {
+                let mut forest = Khf::new(FANOUTS, ThreadRng::default());
+                forest.derive(KEYS as u64 - 1).unwrap();
+                forest.consolidate(Consolidation::Leveled {
+                    level: level as u64,
+                });
+                forest
+            },
         })
         .collect()
 }
@@ -56,10 +51,14 @@ fn bench(c: &mut Criterion) {
 
     for test in setup().iter_mut() {
         group.bench_function(&test.name, |b| {
-            b.iter(|| {
-                let sink = FromStd::new(NamedTempFile::new().unwrap());
-                test.forest.persist(sink).unwrap();
-            })
+            b.iter_batched(
+                &mut test.forest,
+                |mut forest| {
+                    let sink = FromStd::new(NamedTempFile::new().unwrap());
+                    forest.persist(sink).unwrap();
+                },
+                criterion::BatchSize::SmallInput,
+            )
         });
     }
 

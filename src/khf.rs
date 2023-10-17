@@ -79,7 +79,7 @@ where
         self.roots.len() == 1 && self.roots[0].pos == (0, 0)
     }
 
-    /// Returns the keys which have been updated since the last epoch
+    /// Returns the keys that have been updated since the last epoch
     pub fn updated_keys(&self) -> &BTreeSet<u64> {
         &self.updated_keys
     }

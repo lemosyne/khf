@@ -58,7 +58,7 @@ where
                                 write!(command, " [{}]", hex::encode(self.forest.update(key)?))?;
                             }
                             Command::Commit => {
-                                self.forest.commit();
+                                write!(command, " {:?}", self.forest.commit())?;
                             }
                             Command::Clear => {
                                 self.history.clear();

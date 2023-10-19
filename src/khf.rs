@@ -33,7 +33,7 @@ pub struct Khf<R, H, const N: usize> {
     #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
     roots: Vec<Node<H, N>>,
     // The number of keys a `Khf` currently provides.
-    pub(crate) keys: u64,
+    keys: u64,
     // The CSPRNG used to generate random roots.
     #[serde(skip)]
     rng: R,
@@ -111,7 +111,7 @@ where
         let affected = (0..self.keys).into_iter().collect();
 
         let node = Node::with_rng(&mut self.rng);
-        self.replace_keys(level, 0, self.keys, &node);
+        self.replace_keys(level, 0, self.keys, node);
 
         // Unmark keys as updated and update the whole range of keys.
         self.updated_keys.clear();
@@ -130,7 +130,7 @@ where
 
         // Update the range of keys.
         let node = Node::with_rng(&mut self.rng);
-        self.replace_keys(level, start, end, &node);
+        self.replace_keys(level, start, end, node);
 
         // The consolidated range of keys shouldn't be considered as updated.
         for key in &affected {
@@ -150,8 +150,8 @@ where
         let pos = self.topology.leaf_position(key);
 
         // Derive the key from the appending root if it should be appended.
-        if key >= self.keys {
-            self.in_flight_keys = key;
+        if self.keys < key {
+            self.in_flight_keys = self.in_flight_keys.max(key + 1);
             return self.appending_root.derive(&self.topology, pos);
         }
 
@@ -208,19 +208,17 @@ where
     }
 
     /// Replaces a range of keys with keys derived from a given root.
-    fn replace_keys(&mut self, level: u64, start: u64, end: u64, root: &Node<H, N>) {
+    fn replace_keys(&mut self, level: u64, start: u64, end: u64, root: Node<H, N>) {
         // Level 0 means consolidating to a single root.
         if level == 0 {
-            self.roots = vec![Node::with_rng(&mut self.rng)];
-            self.keys = end;
-            self.updated_keys.extend(start..end);
+            self.roots = vec![root];
             return;
         }
 
-        // Updates cause consolidated forests to fragment.
+        // Fragment the forest to cover all the keys.
         if self.is_consolidated() {
-            self.keys = self.keys.max(end);
-            self.roots = self.roots[0].coverage(&self.topology, level, 0, self.keys);
+            self.roots =
+                self.roots[0].coverage(&self.topology, level, 0, self.in_flight_keys.max(end));
         }
 
         // We need to create a new set of roots and store updated roots.
@@ -297,58 +295,88 @@ where
     }
 
     fn commit(&mut self) -> Vec<Self::KeyId> {
-        let mut updated_keys = vec![];
+        // We're effectively getting rid of the tree, so consolidate to a new root.
+        if self.in_flight_keys == 0 {
+            let node = Node::with_rng(&mut self.rng);
+            self.replace_keys(0, 0, 0, node);
+        }
 
+        // We need to append keys.
         if self.in_flight_keys >= self.keys {
-            // Fragment in the appended keys if we're not consolidated.
-            if !self.is_consolidated() {
+            // If we've updated every single key since the last commit, we can consolidate
+            // everything to a new root.
+            if self.updated_keys.len() as u64 == self.in_flight_keys {
+                let node = Node::with_rng(&mut self.rng);
+                self.replace_keys(0, 0, 0, node);
+            }
+            // Otherwise, we need to fragment in appended keys and then updated keys.
+            else {
+                // Fragment in the appended keys.
                 self.replace_keys(
                     DEFAULT_ROOT_LEVEL,
                     self.keys,
                     self.in_flight_keys,
-                    &self.appending_root.clone(),
+                    self.appending_root.clone(),
                 );
-            }
 
-            // Fragment in updated keys.
-            let updating_root = Node::with_rng(&mut self.rng);
-            for (start, end) in self.updated_key_ranges() {
-                self.replace_keys(DEFAULT_ROOT_LEVEL, start, end, &updating_root);
-                updated_keys.extend(start..end);
-            }
-        } else {
-            // If we're consolidated, we'll just truncate using the top level root. Otherwise, we
-            // need to find the root that covers the last key and truncate it.
-            if self.is_consolidated() {
-                self.roots = self.roots[0].coverage(
-                    &self.topology,
-                    DEFAULT_ROOT_LEVEL,
-                    0,
-                    self.in_flight_keys,
-                );
-            } else {
-                let index = self
-                    .roots
-                    .iter()
-                    .position(|root| self.topology.end(root.pos) > self.in_flight_keys)
-                    .unwrap();
-                let start = self.topology.start(self.roots[index].pos);
-                let root = self.roots.drain(index..).next().unwrap();
-
-                self.roots.append(&mut root.coverage(
-                    &self.topology,
-                    DEFAULT_ROOT_LEVEL,
-                    start,
-                    self.in_flight_keys,
-                ))
+                // Fragment in updated keys.
+                for (start, end) in self.updated_key_ranges() {
+                    let node = Node::with_rng(&mut self.rng);
+                    self.replace_keys(DEFAULT_ROOT_LEVEL, start, end, node);
+                }
             }
         }
 
-        // Clear updated keys and get a new updating root and appending root.
-        self.updated_keys.clear();
+        // We need to truncate keys.
+        if self.in_flight_keys < self.keys {
+            // We can forget about updated keys that have been truncated.
+            self.updated_keys.retain(|key| *key < self.in_flight_keys);
+
+            // If we've touched every key post-truncation, we can just consolidate to a new root.
+            if self.updated_keys.len() as u64 == self.in_flight_keys {
+                let node = Node::with_rng(&mut self.rng);
+                self.replace_keys(0, 0, 0, node);
+            }
+            // Otherwise, we'll need to actually truncate something.
+            else {
+                // If we're consolidated, we'll just truncate using the top level root.
+                if self.is_consolidated() {
+                    self.roots = self.roots[0].coverage(
+                        &self.topology,
+                        DEFAULT_ROOT_LEVEL,
+                        0,
+                        self.in_flight_keys,
+                    );
+                }
+                // Otherwise, we need to find the root that covers the last key and truncate it.
+                else {
+                    let index = self
+                        .roots
+                        .iter()
+                        .position(|root| self.topology.end(root.pos) > self.in_flight_keys)
+                        .unwrap();
+                    let start = self.topology.start(self.roots[index].pos);
+                    let root = self.roots.drain(index..).next().unwrap();
+
+                    self.roots.append(&mut root.coverage(
+                        &self.topology,
+                        DEFAULT_ROOT_LEVEL,
+                        start,
+                        self.in_flight_keys,
+                    ))
+                }
+            }
+        }
+
+        // Get a new appending root, and update our known number of keys.
         self.appending_root = Node::with_rng(&mut self.rng);
         self.keys = self.in_flight_keys;
 
+        // We need to effectively drain the updated keys into a vector, which isn't yet stabilized.
+        let mut updated_keys = vec![];
+        while let Some(key) = self.updated_keys.pop_first() {
+            updated_keys.push(key);
+        }
         updated_keys
     }
 }
@@ -400,71 +428,41 @@ mod tests {
     fn it_works() -> Result<()> {
         let mut khf = Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::new(&[2, 2], thread_rng());
 
-        // We start off with one root.
-        assert_eq!(khf.fragmentation(), 1);
-
-        // Deriving any key is strictly an append, so no additional fragmentation.
+        // We'll check that we can re-derive this after commit.
         let key4 = khf.derive(4)?;
-        assert_eq!(khf.fragmentation(), 1);
 
-        // Updating keys won't cause fragmentation until commit.
-        let key1 = khf.update(1)?;
-        let key2 = khf.update(2)?;
-        assert_eq!(khf.fragmentation(), 1);
+        // Keys updated/derived during the same epoch should be the same.
+        let key5 = khf.derive(5)?;
+        let key5_updated = khf.update(5)?;
+        assert_eq!(key5, key5_updated);
+        assert_eq!(khf.commit(), vec![5]);
 
-        // Committing should yield the two updated keys.
-        assert_eq!(vec![1, 2], khf.commit());
-
-        // The `Khf` should be entirely fragmented now.
-        // This means we should have 5 roots since we have keys [0..4].
-        assert_eq!(khf.fragmentation(), 5);
-
-        // We should be able to derive the previously derived/updated keys.
-        let key1_updated = khf.derive(1)?;
-        let key2_updated = khf.derive(2)?;
+        // Should still be able to derive old keys, but not updated keys.
         let key4_rederived = khf.derive(4)?;
-        assert_eq!(key1, key1_updated);
-        assert_eq!(key2, key2_updated);
+        let key5_rederived = khf.derive(5)?;
         assert_eq!(key4, key4_rederived);
+        assert_ne!(key5, key5_rederived);
 
-        // Deriving appended keys now should cause fragmentation.
-        // 0 1 2 3 4 5 [6 7] [[8 9] [10 11]]
-        let key11 = khf.derive(11)?;
-        assert_eq!(khf.fragmentation(), 8);
+        // Truncating down to 2 keys won't change the value of keys derived before the next commit.
+        // It will also get rid of any prior updates to larger keys.
+        khf.update(5)?;
+        khf.truncate(2);
+        let key0 = khf.derive(0)?;
+        let key1 = khf.derive(1)?;
+        let key4_rederived_again = khf.derive(4)?;
+        let key5_rederived_again = khf.derive(5)?;
+        assert_eq!(key4_rederived_again, key4_rederived);
+        assert_eq!(key5_rederived_again, key5_rederived);
 
-        // Committing should yield no keys.
-        assert!(khf.commit().is_empty());
-
-        // We can update a key we don't yet cover and still derive appended keys in between.
-        // 0 1 2 3 4 5 [6 7] [[8 9] [10 11]] [[12 13] [14 15]]
-        let key15 = khf.update(15)?;
-        let key15_derived = khf.derive(15)?;
-        let key13 = khf.derive(13)?;
-        assert_eq!(khf.keys, 16);
-        assert_eq!(key15, key15_derived);
-        assert_eq!(khf.fragmentation(), 9);
-
-        // Committing should yield the one update key.
-        assert_eq!(vec![15], khf.commit());
-
-        // We can still derive the old stuff.
-        let key11_rederived = khf.derive(11)?;
-        let key13_rederived = khf.derive(13)?;
-        let key15_rederived = khf.derive(15)?;
-        assert_eq!(key11, key11_rederived);
-        assert_eq!(key13, key13_rederived);
-        assert_eq!(key15, key15_rederived);
-
-        // One more check on appending.
-        // 0 1 2 3 4 5 [6 7] [[8 9] [10 11]] [12 13] 14 15 16
-        let key16 = khf.derive(16)?;
-        assert_eq!(khf.fragmentation(), 12);
-
-        // Committing should yield no keys.
-        assert!(khf.commit().is_empty());
-
-        let key16_rederived = khf.derive(16)?;
-        assert_eq!(key16, key16_rederived);
+        assert_eq!(khf.commit(), vec![]);
+        let key0_rederived = khf.derive(0)?;
+        let key1_rederived = khf.derive(1)?;
+        let key4_rederived_yet_again = khf.derive(4)?;
+        let key5_rederived_yet_again = khf.derive(5)?;
+        assert_eq!(key0, key0_rederived);
+        assert_eq!(key1, key1_rederived);
+        assert_ne!(key4_rederived_yet_again, key4_rederived_again);
+        assert_ne!(key5_rederived_yet_again, key5_rederived_again);
 
         Ok(())
     }

@@ -27,6 +27,7 @@ pub struct Khf<R, H, const N: usize> {
     #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
     updating_root: Node<H, N>,
     // Tracks updated keys.
+    #[serde(skip)]
     updated_keys: BTreeSet<u64>,
     // The list of roots.
     #[serde(bound(serialize = "Node<H, N>: Serialize"))]
@@ -79,9 +80,14 @@ where
         self.roots.len() == 1 && self.roots[0].pos == (0, 0)
     }
 
-    /// Returns the keys that have been updated since the last epoch
+    /// The keys that have been updated since the last epoch
     pub fn updated_keys(&self) -> &BTreeSet<u64> {
         &self.updated_keys
+    }
+
+    /// The keys that have been updated since the last epoch
+    pub fn updated_keys_mut(&mut self) -> &mut BTreeSet<u64> {
+        &mut self.updated_keys
     }
 
     /// Consolidates the `Khf` and returns the affected keys.

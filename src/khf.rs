@@ -5,7 +5,11 @@ use kms::KeyManagementScheme;
 use persistence::Persist;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, collections::BTreeSet, fmt};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap},
+    fmt,
+};
 
 /// The default level for roots created when mutating a `Khf`.
 const DEFAULT_ROOT_LEVEL: u64 = 1;
@@ -37,6 +41,9 @@ pub struct Khf<R, H, const N: usize> {
     // The CSPRNG used to generate random roots.
     #[serde(skip)]
     rng: R,
+    // Holds keys computed between commits
+    #[serde(skip)]
+    cached_keys: HashMap<u64, Key<N>>,
 }
 
 /// A list of different mechanisms, or ways, to consolidate a `Khf`.
@@ -66,6 +73,7 @@ where
             roots: vec![Node::with_rng(&mut rng)],
             keys: 0,
             rng: rng.clone(),
+            cached_keys: HashMap::new(),
         }
     }
 
@@ -170,12 +178,6 @@ where
             .unwrap();
 
         self.roots[index].derive(&self.topology, pos)
-    }
-
-    /// Updates a key.
-    fn update_key(&mut self, key: u64) -> Key<N> {
-        self.updated_keys.insert(key);
-        self.derive_key(key)
     }
 
     fn updated_key_ranges(&self) -> Vec<(u64, u64)> {
@@ -287,11 +289,18 @@ where
     type Error = Error;
 
     fn derive(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        Ok(self.derive_key(key))
+        if let Some(k) = self.cached_keys.get(&key) {
+            Ok(*k)
+        } else {
+            let k = self.derive_key(key);
+            self.cached_keys.insert(key, k);
+            Ok(k)
+        }
     }
 
     fn update(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        Ok(self.update_key(key))
+        self.updated_keys.insert(key);
+        self.derive(key)
     }
 
     fn commit(&mut self) -> Vec<Self::KeyId> {
@@ -367,6 +376,9 @@ where
                 }
             }
         }
+
+        // Clear out our cache.
+        self.cached_keys.clear();
 
         // Get a new appending root, and update our known number of keys.
         self.appending_root = Node::with_rng(&mut self.rng);

@@ -16,7 +16,7 @@ use app::App;
 
 pub mod command;
 
-type DefaultKhf = Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>;
+type DefaultKhf = Khf<Sha3_256, SHA3_256_MD_SIZE>;
 
 #[derive(Parser)]
 struct Args {
@@ -28,6 +28,7 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    let mut rng = ThreadRng::default();
     let forest = DefaultKhf::new(&args.fanouts, ThreadRng::default());
 
     enable_raw_mode()?;
@@ -36,7 +37,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = App::new(forest).run(&mut terminal);
+    let result = App::new(forest).run(&mut terminal, &mut rng);
 
     disable_raw_mode()?;
     execute!(

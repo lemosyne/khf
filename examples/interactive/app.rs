@@ -16,19 +16,18 @@ use tui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-pub struct App<R, H, const N: usize> {
+pub struct App<H, const N: usize> {
     command: String,
     history: Vec<String>,
-    forest: Khf<R, H, N>,
+    forest: Khf<H, N>,
     scroll: u16,
 }
 
-impl<R, H, const N: usize> App<R, H, N>
+impl<H, const N: usize> App<H, N>
 where
-    R: RngCore + CryptoRng + Clone,
     H: Hasher<N>,
 {
-    pub fn new(forest: Khf<R, H, N>) -> Self {
+    pub fn new(forest: Khf<H, N>) -> Self {
         Self {
             command: " $ ".into(),
             history: Vec::new(),
@@ -37,7 +36,11 @@ where
         }
     }
 
-    pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
+    pub fn run<R, B>(&mut self, terminal: &mut Terminal<B>, mut rng: R) -> Result<()>
+    where
+        R: RngCore + CryptoRng,
+        B: Backend,
+    {
         loop {
             terminal.draw(|f| self.ui(f))?;
 
@@ -58,7 +61,7 @@ where
                                 write!(command, " [{}]", hex::encode(self.forest.update(key)?))?;
                             }
                             Command::Commit => {
-                                write!(command, " {:?}", self.forest.commit())?;
+                                write!(command, " {:?}", self.forest.commit(&mut rng))?;
                             }
                             Command::Clear => {
                                 self.history.clear();

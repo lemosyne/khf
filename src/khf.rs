@@ -2,7 +2,6 @@ use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
 use embedded_io::blocking::{Read, Write};
 use hasher::Hasher;
 use kms::KeyManagementScheme;
-use persistence::Persist;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::BTreeSet, fmt};
@@ -378,27 +377,6 @@ where
             updated_keys.push(key);
         }
         updated_keys
-    }
-}
-
-impl<Io, R, H, const N: usize> Persist<Io> for Khf<R, H, N>
-where
-    R: Default,
-    Io: Read + Write,
-{
-    type Error = Error;
-
-    fn persist(&mut self, mut sink: Io) -> Result<(), Self::Error> {
-        // TODO: Stream serialization.
-        let ser = bincode::serialize(&self)?;
-        sink.write_all(&ser).map_err(|_| Error::Io)
-    }
-
-    fn load(mut source: Io) -> Result<Self, Self::Error> {
-        // TODO: Stream deserialization.
-        let mut raw = vec![];
-        source.read_to_end(&mut raw).map_err(|_| Error::Io)?;
-        Ok(bincode::deserialize(&raw)?)
     }
 }
 

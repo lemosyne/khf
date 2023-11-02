@@ -1,10 +1,13 @@
 use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
-use embedded_io::blocking::{Read, Write};
 use hasher::Hasher;
 use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, collections::BTreeSet, fmt};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap},
+    fmt,
+};
 
 /// The default level for roots created when mutating a `Khf`.
 const DEFAULT_ROOT_LEVEL: u64 = 1;
@@ -14,7 +17,7 @@ const DEFAULT_ROOT_LEVEL: u64 = 1;
 /// keys, but also updating keys such that they cannot be rederived post-update. Updating a key is
 /// synonymous to revoking a key.
 #[derive(Deserialize, Serialize)]
-pub struct Khf<R, H, const N: usize> {
+pub struct Khf<H, const N: usize> {
     // The topology of a `Khf`.
     topology: Topology,
     // Root that appended keys are derived from.
@@ -33,9 +36,9 @@ pub struct Khf<R, H, const N: usize> {
     roots: Vec<Node<H, N>>,
     // The number of keys a `Khf` currently provides.
     keys: u64,
-    // The CSPRNG used to generate random roots.
+    // Holds keys computed between commits
     #[serde(skip)]
-    rng: R,
+    cached_keys: HashMap<u64, Key<N>>,
 }
 
 /// A list of different mechanisms, or ways, to consolidate a `Khf`.
@@ -50,13 +53,12 @@ pub enum Consolidation {
     RangedLeveled { level: u64, start: u64, end: u64 },
 }
 
-impl<R, H, const N: usize> Khf<R, H, N>
+impl<H, const N: usize> Khf<H, N>
 where
-    R: RngCore + CryptoRng + Clone,
     H: Hasher<N>,
 {
     /// Constructs a new `Khf`.
-    pub fn new(fanouts: &[u64], mut rng: R) -> Self {
+    pub fn new(fanouts: &[u64], mut rng: impl RngCore + CryptoRng) -> Self {
         Self {
             topology: Topology::new(fanouts),
             appending_root: Node::with_rng(&mut rng),
@@ -64,7 +66,7 @@ where
             updated_keys: BTreeSet::new(),
             roots: vec![Node::with_rng(&mut rng)],
             keys: 0,
-            rng: rng.clone(),
+            cached_keys: HashMap::new(),
         }
     }
 
@@ -89,27 +91,31 @@ where
     }
 
     /// Consolidates the `Khf` and returns the affected keys.
-    pub fn consolidate(&mut self, mechanism: Consolidation) -> Vec<u64> {
+    pub fn consolidate(
+        &mut self,
+        mechanism: Consolidation,
+        rng: impl RngCore + CryptoRng,
+    ) -> Vec<u64> {
         match mechanism {
-            Consolidation::Full => self.consolidate_full(),
-            Consolidation::Leveled { level } => self.consolidate_leveled(level),
-            Consolidation::Ranged { start, end } => self.consolidate_ranged(start, end),
+            Consolidation::Full => self.consolidate_full(rng),
+            Consolidation::Leveled { level } => self.consolidate_leveled(level, rng),
+            Consolidation::Ranged { start, end } => self.consolidate_ranged(start, end, rng),
             Consolidation::RangedLeveled { level, start, end } => {
-                self.consolidate_ranged_leveled(level, start, end)
+                self.consolidate_ranged_leveled(level, start, end, rng)
             }
         }
     }
 
     // Consolidates back into a single root.
-    fn consolidate_full(&mut self) -> Vec<u64> {
-        self.consolidate_leveled(0)
+    fn consolidate_full(&mut self, rng: impl RngCore + CryptoRng) -> Vec<u64> {
+        self.consolidate_leveled(0, rng)
     }
 
     // Consolidates to roots of a certain level.
-    fn consolidate_leveled(&mut self, level: u64) -> Vec<u64> {
+    fn consolidate_leveled(&mut self, level: u64, mut rng: impl RngCore + CryptoRng) -> Vec<u64> {
         let affected = (0..self.keys).into_iter().collect();
 
-        let node = Node::with_rng(&mut self.rng);
+        let node = Node::with_rng(&mut rng);
         self.replace_keys(level, 0, self.keys, node);
 
         // Unmark keys as updated and update the whole range of keys.
@@ -119,16 +125,27 @@ where
     }
 
     // Consolidates the roots for a range of keys.
-    fn consolidate_ranged(&mut self, start: u64, end: u64) -> Vec<u64> {
-        self.consolidate_ranged_leveled(DEFAULT_ROOT_LEVEL, start, end)
+    fn consolidate_ranged(
+        &mut self,
+        start: u64,
+        end: u64,
+        rng: impl RngCore + CryptoRng,
+    ) -> Vec<u64> {
+        self.consolidate_ranged_leveled(DEFAULT_ROOT_LEVEL, start, end, rng)
     }
 
     // Consolidates the roots for a range of keys to roots of a certain level.
-    fn consolidate_ranged_leveled(&mut self, level: u64, start: u64, end: u64) -> Vec<u64> {
+    fn consolidate_ranged_leveled(
+        &mut self,
+        level: u64,
+        start: u64,
+        end: u64,
+        mut rng: impl RngCore + CryptoRng,
+    ) -> Vec<u64> {
         let affected = (start..end).into_iter().collect();
 
         // Update the range of keys.
-        let node = Node::with_rng(&mut self.rng);
+        let node = Node::with_rng(&mut rng);
         self.replace_keys(level, start, end, node);
 
         // The consolidated range of keys shouldn't be considered as updated.
@@ -169,12 +186,6 @@ where
             .unwrap();
 
         self.roots[index].derive(&self.topology, pos)
-    }
-
-    /// Updates a key.
-    fn update_key(&mut self, key: u64) -> Key<N> {
-        self.updated_keys.insert(key);
-        self.derive_key(key)
     }
 
     fn updated_key_ranges(&self) -> Vec<(u64, u64)> {
@@ -273,9 +284,8 @@ where
     }
 }
 
-impl<'a, 'b, R, H, const N: usize> KeyManagementScheme for Khf<R, H, N>
+impl<H, const N: usize> KeyManagementScheme for Khf<H, N>
 where
-    R: RngCore + CryptoRng + Clone,
     H: Hasher<N>,
 {
     /// Keys have the same size as the hash digest size.
@@ -286,17 +296,24 @@ where
     type Error = Error;
 
     fn derive(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        Ok(self.derive_key(key))
+        if let Some(k) = self.cached_keys.get(&key) {
+            Ok(*k)
+        } else {
+            let k = self.derive_key(key);
+            self.cached_keys.insert(key, k);
+            Ok(k)
+        }
     }
 
     fn update(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        Ok(self.update_key(key))
+        self.updated_keys.insert(key);
+        self.derive(key)
     }
 
-    fn commit(&mut self) -> Vec<Self::KeyId> {
+    fn commit(&mut self, mut rng: impl RngCore + CryptoRng) -> Vec<Self::KeyId> {
         // We're effectively getting rid of the tree, so consolidate to a new root.
         if self.in_flight_keys == 0 {
-            let node = Node::with_rng(&mut self.rng);
+            let node = Node::with_rng(&mut rng);
             self.replace_keys(0, 0, 0, node);
         }
 
@@ -305,7 +322,7 @@ where
             // If we've updated every single key since the last commit, we can consolidate
             // everything to a new root.
             if self.updated_keys.len() as u64 == self.in_flight_keys {
-                let node = Node::with_rng(&mut self.rng);
+                let node = Node::with_rng(&mut rng);
                 self.replace_keys(0, 0, 0, node);
             }
             // Otherwise, we need to fragment in appended keys and then updated keys.
@@ -320,7 +337,7 @@ where
 
                 // Fragment in updated keys.
                 for (start, end) in self.updated_key_ranges() {
-                    let node = Node::with_rng(&mut self.rng);
+                    let node = Node::with_rng(&mut rng);
                     self.replace_keys(DEFAULT_ROOT_LEVEL, start, end, node);
                 }
             }
@@ -333,7 +350,7 @@ where
 
             // If we've touched every key post-truncation, we can just consolidate to a new root.
             if self.updated_keys.len() as u64 == self.in_flight_keys {
-                let node = Node::with_rng(&mut self.rng);
+                let node = Node::with_rng(&mut rng);
                 self.replace_keys(0, 0, 0, node);
             }
             // Otherwise, we'll need to actually truncate something.
@@ -367,8 +384,11 @@ where
             }
         }
 
+        // Clear out our cache.
+        self.cached_keys.clear();
+
         // Get a new appending root, and update our known number of keys.
-        self.appending_root = Node::with_rng(&mut self.rng);
+        self.appending_root = Node::with_rng(&mut rng);
         self.keys = self.in_flight_keys;
 
         // We need to effectively drain the updated keys into a vector, which isn't yet stabilized.
@@ -380,7 +400,7 @@ where
     }
 }
 
-impl<R, H, const N: usize> fmt::Display for Khf<R, H, N>
+impl<H, const N: usize> fmt::Display for Khf<H, N>
 where
     H: Hasher<N>,
 {
@@ -400,11 +420,12 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
-    use rand::{rngs::ThreadRng, thread_rng};
+    use rand::rngs::ThreadRng;
 
     #[test]
     fn it_works() -> Result<()> {
-        let mut khf = Khf::<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>::new(&[2, 2], thread_rng());
+        let mut rng = ThreadRng::default();
+        let mut khf = Khf::<Sha3_256, SHA3_256_MD_SIZE>::new(&[2, 2], &mut rng);
 
         // We'll check that we can re-derive this after commit.
         let key4 = khf.derive(4)?;
@@ -413,7 +434,7 @@ mod tests {
         let key5 = khf.derive(5)?;
         let key5_updated = khf.update(5)?;
         assert_eq!(key5, key5_updated);
-        assert_eq!(khf.commit(), vec![5]);
+        assert_eq!(khf.commit(&mut rng), vec![5]);
 
         // Should still be able to derive old keys, but not updated keys.
         let key4_rederived = khf.derive(4)?;
@@ -432,7 +453,7 @@ mod tests {
         assert_eq!(key4_rederived_again, key4_rederived);
         assert_eq!(key5_rederived_again, key5_rederived);
 
-        assert_eq!(khf.commit(), vec![]);
+        assert_eq!(khf.commit(&mut rng), vec![]);
         let key0_rederived = khf.derive(0)?;
         let key1_rederived = khf.derive(1)?;
         let key4_rederived_yet_again = khf.derive(4)?;

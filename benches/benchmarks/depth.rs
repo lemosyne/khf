@@ -4,7 +4,7 @@ use criterion::{criterion_group, Criterion};
 use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
 use khf::{Consolidation, Khf};
 use kms::KeyManagementScheme;
-use rand::rngs::ThreadRng;
+use rand::thread_rng;
 
 // Descendants per level:
 //  L1: 16384
@@ -19,13 +19,13 @@ const KEYS: usize = 32768;
 
 struct TestCase {
     name: String,
-    forest: Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+    forest: Khf<Sha3_256, SHA3_256_MD_SIZE>,
 }
 
 fn setup() -> Vec<TestCase> {
     (1..FANOUTS.len())
         .map(|i| {
-            let mut forest = Khf::new(&FANOUTS[..i], ThreadRng::default());
+            let mut forest = Khf::new(&FANOUTS[..i], thread_rng());
 
             forest.derive(KEYS as u64 - 1).unwrap();
 
@@ -51,7 +51,7 @@ fn bench(c: &mut Criterion) {
                     key += 1;
                 }
 
-                test.forest.consolidate(Consolidation::Full);
+                test.forest.consolidate(Consolidation::Full, thread_rng());
                 test.forest.derive(KEYS as u64 - 1).unwrap();
             })
         });

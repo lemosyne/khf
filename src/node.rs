@@ -17,6 +17,15 @@ pub struct Node<H, const N: usize> {
     pd: PhantomData<H>,
 }
 
+impl<H, const N: usize> fmt::Debug for Node<H, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Node")
+            .field("pos", &self.pos)
+            .field("key", &hex::encode(&self.key))
+            .finish()
+    }
+}
+
 // Manually implemented to avoid restrictive bounds on `H`.
 impl<H, const N: usize> Clone for Node<H, N> {
     fn clone(&self) -> Self {

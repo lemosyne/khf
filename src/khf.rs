@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, HashMap},
-    fmt,
+    fmt, fs,
 };
 
 /// The default level for roots created when mutating a `Khf`.
@@ -166,7 +166,7 @@ where
         let pos = self.topology.leaf_position(key);
 
         // Derive the key from the appending root if it should be appended.
-        if self.keys < key {
+        if key >= self.keys {
             self.in_flight_keys = self.in_flight_keys.max(key + 1);
             return self.appending_root.derive(&self.topology, pos);
         }
@@ -183,7 +183,11 @@ where
                     Ordering::Greater
                 }
             })
-            .unwrap();
+            .unwrap_or_else(|_| {
+                eprintln!("failed to derive {key}");
+                fs::write("/tmp/fuckme", bincode::serialize(self).unwrap()).unwrap();
+                panic!("gg");
+            });
 
         self.roots[index].derive(&self.topology, pos)
     }
@@ -316,9 +320,8 @@ where
             let node = Node::with_rng(&mut rng);
             self.replace_keys(0, 0, 0, node);
         }
-
         // We need to append keys.
-        if self.in_flight_keys >= self.keys {
+        else if self.in_flight_keys >= self.keys {
             // If we've updated every single key since the last commit, we can consolidate
             // everything to a new root.
             if self.updated_keys.len() as u64 == self.in_flight_keys {
@@ -342,9 +345,8 @@ where
                 }
             }
         }
-
         // We need to truncate keys.
-        if self.in_flight_keys < self.keys {
+        else if self.in_flight_keys < self.keys {
             // We can forget about updated keys that have been truncated.
             self.updated_keys.retain(|key| *key < self.in_flight_keys);
 

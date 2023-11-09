@@ -3,7 +3,7 @@
 //! `Khf`s. We fragment each `Khf` and consolidate it to roots of a different level.
 
 use criterion::{criterion_group, BatchSize, Criterion};
-use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
+use hasher::sha3::{Sha3_256, SHA3_256_MD_SIZE};
 use khf::{Consolidation, Khf};
 use kms::KeyManagementScheme;
 use rand::thread_rng;

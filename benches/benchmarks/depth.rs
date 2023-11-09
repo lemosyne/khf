@@ -1,7 +1,7 @@
 //! This benchmark aims to compare the rate of fragmentation between `Khf`s with different depths.
 
 use criterion::{criterion_group, Criterion};
-use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
+use hasher::sha3::{Sha3_256, SHA3_256_MD_SIZE};
 use khf::{Consolidation, Khf};
 use kms::KeyManagementScheme;
 use rand::thread_rng;

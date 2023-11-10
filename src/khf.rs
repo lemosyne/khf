@@ -505,86 +505,88 @@ where
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use anyhow::Result;
-//     use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
-//     use rand::rngs::ThreadRng;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use hasher::sha3::{Sha3_256, SHA3_256_MD_SIZE};
+    // use rand::rngs::ThreadRng;
 
-//     #[test]
-//     fn it_works() -> Result<()> {
-//         let mut rng = ThreadRng::default();
-//         let mut khf = Khf::<Sha3_256, SHA3_256_MD_SIZE>::new(&[2, 2], &mut rng);
+    // #[test]
+    // fn it_works() -> Result<()> {
+    //     let mut rng = ThreadRng::default();
+    //     let mut khf = Khf::<Sha3_256, SHA3_256_MD_SIZE>::new(&[2, 2], &mut rng);
 
-//         // We'll check that we can re-derive this after commit.
-//         let key4 = khf.derive(4)?;
+    //     // We'll check that we can re-derive this after commit.
+    //     let key4 = khf.derive(4)?;
 
-//         // Keys updated/derived during the same epoch should be the same.
-//         let key5 = khf.derive(5)?;
-//         let key5_updated = khf.update(5)?;
-//         assert_eq!(key5, key5_updated);
-//         assert_eq!(khf.commit(&mut rng), vec![5]);
+    //     // Keys updated/derived during the same epoch should be the same.
+    //     let key5 = khf.derive(5)?;
+    //     let key5_updated = khf.update(5)?;
+    //     assert_eq!(key5, key5_updated);
+    //     assert_eq!(khf.commit(&mut rng)?, vec![(5, key5)]);
 
-//         // Should still be able to derive old keys, but not updated keys.
-//         let key4_rederived = khf.derive(4)?;
-//         let key5_rederived = khf.derive(5)?;
-//         assert_eq!(key4, key4_rederived);
-//         assert_ne!(key5, key5_rederived);
+    //     // Should still be able to derive old keys, but not updated keys.
+    //     let key4_rederived = khf.derive(4)?;
+    //     let key5_rederived = khf.derive(5)?;
+    //     assert_eq!(key4, key4_rederived);
+    //     assert_ne!(key5, key5_rederived);
 
-//         // Truncating down to 2 keys won't change the value of keys derived before the next commit.
-//         // It will also get rid of any prior updates to larger keys.
-//         khf.update(5)?;
-//         khf.truncate(2);
-//         let key0 = khf.derive(0)?;
-//         let key1 = khf.derive(1)?;
-//         let key4_rederived_again = khf.derive(4)?;
-//         let key5_rederived_again = khf.derive(5)?;
-//         assert_eq!(key4_rederived_again, key4_rederived);
-//         assert_eq!(key5_rederived_again, key5_rederived);
+    //     // Truncating down to 2 keys won't change the value of keys derived before the next commit.
+    //     // It will also get rid of any prior updates to larger keys.
+    //     khf.update(5)?;
+    //     khf.truncate(2);
+    //     let key0 = khf.derive(0)?;
+    //     let key1 = khf.derive(1)?;
+    //     let key4_rederived_again = khf.derive(4)?;
+    //     let key5_rederived_again = khf.derive(5)?;
+    //     assert_eq!(key4_rederived_again, key4_rederived);
+    //     assert_eq!(key5_rederived_again, key5_rederived);
 
-//         assert_eq!(khf.commit(&mut rng), vec![]);
-//         let key0_rederived = khf.derive(0)?;
-//         let key1_rederived = khf.derive(1)?;
-//         let key4_rederived_yet_again = khf.derive(4)?;
-//         let key5_rederived_yet_again = khf.derive(5)?;
-//         assert_eq!(key0, key0_rederived);
-//         assert_eq!(key1, key1_rederived);
-//         assert_ne!(key4_rederived_yet_again, key4_rederived_again);
-//         assert_ne!(key5_rederived_yet_again, key5_rederived_again);
+    //     assert_eq!(khf.commit(&mut rng), vec![]);
+    //     let key0_rederived = khf.derive(0)?;
+    //     let key1_rederived = khf.derive(1)?;
+    //     let key4_rederived_yet_again = khf.derive(4)?;
+    //     let key5_rederived_yet_again = khf.derive(5)?;
+    //     assert_eq!(key0, key0_rederived);
+    //     assert_eq!(key1, key1_rederived);
+    //     assert_ne!(key4_rederived_yet_again, key4_rederived_again);
+    //     assert_ne!(key5_rederived_yet_again, key5_rederived_again);
 
-//         Ok(())
-//     }
+    //     Ok(())
+    // }
 
-//     use rand::prelude::*;
-//     use std::collections::HashSet;
+    use rand::prelude::*;
+    use std::collections::HashSet;
 
-//     #[test]
-//     fn random_commit() {
-//         fn all_keys(khf: &mut Khf<Sha3_256, SHA3_256_MD_SIZE>) -> Vec<[u8; SHA3_256_MD_SIZE]> {
-//             (0..100).map(|i| khf.derive(i).unwrap()).collect()
-//         }
+    #[test]
+    fn random_commit() -> Result<()> {
+        fn all_keys(khf: &mut Khf<Sha3_256, SHA3_256_MD_SIZE>) -> Vec<[u8; SHA3_256_MD_SIZE]> {
+            (0..100).map(|i| khf.derive(i).unwrap()).collect()
+        }
 
-//         let mut rng = thread_rng();
-//         let mut khf = Khf::<Sha3_256, SHA3_256_MD_SIZE>::new(&[4, 4, 4, 4], &mut rng);
+        let mut rng = thread_rng();
+        let mut khf = Khf::<Sha3_256, SHA3_256_MD_SIZE>::new(&[4, 4, 4, 4], &mut rng);
 
-//         for _ in 0..100000 {
-//             let old = all_keys(&mut khf);
+        for _ in 0..10000 {
+            let old = all_keys(&mut khf);
 
-//             let ks: HashSet<u64> = HashSet::from_iter((0..10).map(|_| {
-//                 let k = rng.gen_range(0..100);
-//                 khf.update(k).unwrap();
-//                 khf.commit(&mut rng);
-//                 k
-//             }));
+            let ks: HashSet<u64> = HashSet::from_iter((0..10).map(|_| {
+                let k = rng.gen_range(0..100);
+                khf.update(k).unwrap();
+                khf.commit(&mut rng).unwrap();
+                k
+            }));
 
-//             let new = all_keys(&mut khf);
+            let new = all_keys(&mut khf);
 
-//             for (i, (o, n)) in old.iter().zip(&new).enumerate() {
-//                 if !ks.contains(&(i as u64)) {
-//                     assert_eq!(o, n);
-//                 }
-//             }
-//         }
-//     }
-// }
+            for (i, (o, n)) in old.iter().zip(&new).enumerate() {
+                if !ks.contains(&(i as u64)) {
+                    assert_eq!(o, n);
+                }
+            }
+        }
+
+        Ok(())
+    }
+}

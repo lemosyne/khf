@@ -2,10 +2,10 @@
 //! topologies. Each topology has the same number of L1 descendants.
 
 use criterion::{criterion_group, Criterion};
-use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
+use hasher::sha3::{Sha3_256, SHA3_256_MD_SIZE};
 use khf::{Consolidation, Khf};
 use kms::KeyManagementScheme;
-use rand::rngs::ThreadRng;
+use rand::thread_rng;
 
 const TOPOLOGIES: &[&[u64]] = &[
     &[4, 4, 4],
@@ -21,14 +21,14 @@ const KEYS: usize = 16384;
 
 struct TestCase {
     name: String,
-    forest: Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+    forest: Khf<Sha3_256, SHA3_256_MD_SIZE>,
 }
 
 fn setup() -> Vec<TestCase> {
     TOPOLOGIES
         .iter()
         .map(|fanouts| {
-            let mut forest = Khf::new(fanouts, ThreadRng::default());
+            let mut forest = Khf::new(fanouts, thread_rng());
 
             forest.derive(KEYS as u64 - 1).unwrap();
 
@@ -54,7 +54,7 @@ fn bench(c: &mut Criterion) {
                     key += 1;
                 }
 
-                test.forest.consolidate(Consolidation::Full);
+                test.forest.consolidate(Consolidation::Full, thread_rng());
                 test.forest.derive(KEYS as u64 - 1).unwrap();
             })
         });

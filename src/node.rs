@@ -6,7 +6,7 @@ use hasher::Hasher;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::{fmt, marker::PhantomData};
+use std::{collections::HashMap, fmt, marker::PhantomData};
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
@@ -80,12 +80,97 @@ where
         }
     }
 
+    pub fn derive_and_cache(
+        &self,
+        topology: &Topology,
+        pos: Pos,
+        cache: &mut HashMap<Pos, Key<N>>,
+    ) -> Key<N> {
+        if self.pos == pos {
+            self.key
+        } else {
+            topology.path(self.pos, pos).fold(self.key, |key, pos| {
+                if let Some(cached_key) = cache.get(&pos) {
+                    *cached_key
+                } else {
+                    let mut hasher = H::new();
+                    hasher.update(&key);
+                    hasher.update(&pos.0.to_le_bytes());
+                    hasher.update(&pos.1.to_le_bytes());
+
+                    let key = hasher.finish();
+                    cache.insert(pos, key);
+                    key
+                }
+            })
+        }
+    }
+
+    pub fn derive_cached(
+        &self,
+        topology: &Topology,
+        pos: Pos,
+        cache: &HashMap<Pos, Key<N>>,
+    ) -> Key<N> {
+        if self.pos == pos {
+            self.key
+        } else {
+            topology.path(self.pos, pos).fold(self.key, |key, pos| {
+                if let Some(cached_key) = cache.get(&pos) {
+                    *cached_key
+                } else {
+                    let mut hasher = H::new();
+                    hasher.update(&key);
+                    hasher.update(&pos.0.to_le_bytes());
+                    hasher.update(&pos.1.to_le_bytes());
+                    hasher.finish()
+                }
+            })
+        }
+    }
+
     pub fn coverage(&self, topology: &Topology, level: u64, start: u64, end: u64) -> Vec<Self> {
         topology
             .coverage(level, start, end)
             .map(|pos| Self {
                 pos,
                 key: self.derive(topology, pos),
+                pd: PhantomData,
+            })
+            .collect()
+    }
+
+    pub fn coverage_and_cache(
+        &self,
+        topology: &Topology,
+        level: u64,
+        start: u64,
+        end: u64,
+        cache: &mut HashMap<Pos, Key<N>>,
+    ) -> Vec<Self> {
+        topology
+            .coverage(level, start, end)
+            .map(|pos| Self {
+                pos,
+                key: self.derive_and_cache(topology, pos, cache),
+                pd: PhantomData,
+            })
+            .collect()
+    }
+
+    pub fn coverage_cached(
+        &self,
+        topology: &Topology,
+        level: u64,
+        start: u64,
+        end: u64,
+        cache: &HashMap<Pos, Key<N>>,
+    ) -> Vec<Self> {
+        topology
+            .coverage(level, start, end)
+            .map(|pos| Self {
+                pos,
+                key: self.derive_cached(topology, pos, cache),
                 pd: PhantomData,
             })
             .collect()

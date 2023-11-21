@@ -1,4 +1,9 @@
-use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
+use crate::{
+    aliases::{Key, Pos},
+    error::Error,
+    node::Node,
+    topology::Topology,
+};
 use hasher::Hasher;
 use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
@@ -36,9 +41,9 @@ pub struct Khf<H, const N: usize> {
     roots: Vec<Node<H, N>>,
     // The number of keys a `Khf` currently provides.
     keys: u64,
-    // Holds keys computed between commits
+    // Holds subnodes computed between commits
     #[serde(skip)]
-    cached_keys: HashMap<u64, Key<N>>,
+    cache: HashMap<Pos, Key<N>>,
 }
 
 impl<H, const N: usize> Clone for Khf<H, N> {
@@ -50,7 +55,7 @@ impl<H, const N: usize> Clone for Khf<H, N> {
             updated_keys: self.updated_keys.clone(),
             roots: self.roots.clone(),
             keys: self.keys,
-            cached_keys: self.cached_keys.clone(),
+            cache: self.cache.clone(),
         }
     }
 }
@@ -80,7 +85,7 @@ where
             updated_keys: BTreeSet::new(),
             roots: vec![Node::with_rng(&mut rng)],
             keys: 0,
-            cached_keys: HashMap::new(),
+            cache: HashMap::new(),
         }
     }
 
@@ -182,7 +187,9 @@ where
         // Derive the key from the appending root if it should be appended.
         if key >= self.keys {
             self.in_flight_keys = self.in_flight_keys.max(key + 1);
-            return self.appending_root.derive(&self.topology, pos);
+            return self
+                .appending_root
+                .derive_and_cache(&self.topology, pos, &mut self.cache);
         }
 
         // Binary search for the index of the root covering the key.
@@ -199,19 +206,21 @@ where
             })
             .unwrap();
 
-        self.roots[index].derive(&self.topology, pos)
+        self.roots[index].derive_and_cache(&self.topology, pos, &mut self.cache)
     }
 
     fn derive_key_immutable(&self, key: u64) -> Key<N> {
-        if let Some(key) = self.cached_keys.get(&key) {
+        let pos = self.topology.leaf_position(key);
+
+        if let Some(key) = self.cache.get(&pos) {
             return *key;
         }
 
-        let pos = self.topology.leaf_position(key);
-
         // Derive the key from the appending root if it should be appended.
         if key >= self.keys {
-            return self.appending_root.derive(&self.topology, pos);
+            return self
+                .appending_root
+                .derive_cached(&self.topology, pos, &self.cache);
         }
 
         // Binary search for the index of the root covering the key.
@@ -228,7 +237,7 @@ where
             })
             .unwrap();
 
-        self.roots[index].derive(&self.topology, pos)
+        self.roots[index].derive_cached(&self.topology, pos, &self.cache)
     }
 
     fn updated_key_ranges(&self) -> Vec<(u64, u64)> {
@@ -339,12 +348,12 @@ where
     type Error = Error;
 
     fn derive(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        if let Some(k) = self.cached_keys.get(&key) {
+        let pos = self.topology.leaf_position(key);
+
+        if let Some(k) = self.cache.get(&pos) {
             Ok(*k)
         } else {
-            let k = self.derive_key(key);
-            self.cached_keys.insert(key, k);
-            Ok(k)
+            Ok(self.derive_key(key))
         }
     }
 
@@ -477,7 +486,7 @@ where
         };
 
         // Clear out our cache.
-        self.cached_keys.clear();
+        self.cache.clear();
 
         // Get a new appending root, and update our known number of keys.
         self.appending_root = Node::with_rng(&mut rng);
@@ -585,6 +594,25 @@ mod tests {
                     assert_eq!(o, n);
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn caching() -> Result<()> {
+        let mut keys = HashMap::new();
+        let mut khf = Khf::<Sha3_256, SHA3_256_MD_SIZE>::new(&[4, 4, 4, 4], thread_rng());
+
+        for i in 0..10000 {
+            let key = khf.derive(i).unwrap();
+            keys.insert(i, key);
+        }
+
+        for i in 0..10000 {
+            let cached_key = khf.derive(i).unwrap();
+            let saved_key = keys.get(&i).unwrap();
+            assert_eq!(&cached_key, saved_key);
         }
 
         Ok(())

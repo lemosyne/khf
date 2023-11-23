@@ -25,22 +25,32 @@ const DEFAULT_ROOT_LEVEL: u64 = 1;
 pub struct Khf<H, const N: usize> {
     // The topology of a `Khf`.
     topology: Topology,
+
     // Root that appended keys are derived from.
     #[serde(bound(serialize = "Node<H, N>: Serialize"))]
     #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
     appending_root: Node<H, N>,
+
     // The number of keys in flight.
     #[serde(skip)]
     in_flight_keys: u64,
+    #[serde(skip)]
+    in_flight_keys_dirty: bool,
+
     // Tracks updated keys.
     #[serde(skip)]
     updated_keys: BTreeSet<u64>,
+    #[serde(skip)]
+    updated_keys_dirty: bool,
+
     // The list of roots.
     #[serde(bound(serialize = "Node<H, N>: Serialize"))]
     #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
     roots: Vec<Node<H, N>>,
+
     // The number of keys a `Khf` currently provides.
     keys: u64,
+
     // Holds subnodes computed between commits
     #[serde(skip)]
     cache: HashMap<Pos, Key<N>>,
@@ -52,7 +62,9 @@ impl<H, const N: usize> Clone for Khf<H, N> {
             topology: self.topology.clone(),
             appending_root: self.appending_root.clone(),
             in_flight_keys: self.in_flight_keys,
+            in_flight_keys_dirty: self.in_flight_keys_dirty,
             updated_keys: self.updated_keys.clone(),
+            updated_keys_dirty: self.updated_keys_dirty,
             roots: self.roots.clone(),
             keys: self.keys,
             cache: self.cache.clone(),
@@ -82,7 +94,9 @@ where
             topology: Topology::new(fanouts),
             appending_root: Node::with_rng(&mut rng),
             in_flight_keys: 0,
+            in_flight_keys_dirty: false,
             updated_keys: BTreeSet::new(),
+            updated_keys_dirty: false,
             roots: vec![Node::with_rng(&mut rng)],
             keys: 0,
             cache: HashMap::new(),
@@ -107,6 +121,14 @@ where
     /// The keys that have been updated since the last epoch
     pub fn updated_keys_mut(&mut self) -> &mut BTreeSet<u64> {
         &mut self.updated_keys
+    }
+
+    /// Marks updated keys as clean (i.e., has been persisted).
+    /// Returns whether or not the updated keys were dirty before cleaning.
+    pub fn fetch_clean_updated_keys(&mut self) -> bool {
+        let res = self.updated_keys_dirty;
+        self.updated_keys_dirty = false;
+        res
     }
 
     /// Consolidates the `Khf` and returns the affected keys.
@@ -139,6 +161,7 @@ where
 
         // Unmark keys as updated and update the whole range of keys.
         self.updated_keys.clear();
+        self.updated_keys_dirty = true;
 
         affected
     }
@@ -170,6 +193,7 @@ where
         // The consolidated range of keys shouldn't be considered as updated.
         for key in &affected {
             self.updated_keys.remove(key);
+            self.updated_keys_dirty = true;
         }
 
         affected
@@ -178,6 +202,7 @@ where
     /// Truncates the `Khf` so it only covers a specified number of keys.
     pub fn truncate(&mut self, keys: u64) {
         self.in_flight_keys = keys;
+        self.in_flight_keys_dirty = true;
     }
 
     /// Derives a key.
@@ -187,6 +212,7 @@ where
         // Derive the key from the appending root if it should be appended.
         if key >= self.keys {
             self.in_flight_keys = self.in_flight_keys.max(key + 1);
+            self.in_flight_keys_dirty = true;
             return self
                 .appending_root
                 .derive_and_cache(&self.topology, pos, &mut self.cache);
@@ -359,6 +385,7 @@ where
 
     fn update(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
         self.updated_keys.insert(key);
+        self.updated_keys_dirty = true;
         self.derive(key)
     }
 
@@ -494,6 +521,7 @@ where
 
         // Clear out the updated keys.
         self.updated_keys.clear();
+        self.updated_keys_dirty = true;
 
         Ok(res)
     }

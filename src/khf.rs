@@ -10,7 +10,7 @@ use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, HashMap},
+    collections::{HashMap, HashSet},
     fmt,
 };
 
@@ -39,7 +39,7 @@ pub struct Khf<H, const N: usize> {
 
     // Tracks updated keys.
     #[serde(skip)]
-    updated_keys: BTreeSet<u64>,
+    updated_keys: HashSet<u64>,
     #[serde(skip)]
     updated_keys_dirty: bool,
 
@@ -95,7 +95,7 @@ where
             appending_root: Node::with_rng(&mut rng),
             in_flight_keys: 0,
             in_flight_keys_dirty: false,
-            updated_keys: BTreeSet::new(),
+            updated_keys: HashSet::new(),
             updated_keys_dirty: false,
             roots: vec![Node::with_rng(&mut rng)],
             keys: 0,
@@ -114,12 +114,12 @@ where
     }
 
     /// The keys that have been updated since the last epoch
-    pub fn updated_keys(&self) -> &BTreeSet<u64> {
+    pub fn updated_keys(&self) -> &HashSet<u64> {
         &self.updated_keys
     }
 
     /// The keys that have been updated since the last epoch
-    pub fn updated_keys_mut(&mut self) -> &mut BTreeSet<u64> {
+    pub fn updated_keys_mut(&mut self) -> &mut HashSet<u64> {
         &mut self.updated_keys
     }
 
@@ -277,7 +277,7 @@ where
         let mut prev = 0;
         let mut leaves = 1;
 
-        for leaf in &self.updated_keys {
+        for leaf in itertools::sorted(self.updated_keys.iter()) {
             if first {
                 first = false;
                 start = *leaf;

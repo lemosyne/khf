@@ -1,11 +1,16 @@
-use crate::{aliases::Key, error::Error, node::Node, topology::Topology};
+use crate::{
+    aliases::{Key, Pos},
+    error::Error,
+    node::Node,
+    topology::Topology,
+};
 use hasher::Hasher;
 use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, HashMap},
+    collections::{HashMap, HashSet},
     fmt,
 };
 
@@ -20,25 +25,35 @@ const DEFAULT_ROOT_LEVEL: u64 = 1;
 pub struct Khf<H, const N: usize> {
     // The topology of a `Khf`.
     topology: Topology,
+
     // Root that appended keys are derived from.
     #[serde(bound(serialize = "Node<H, N>: Serialize"))]
     #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
     appending_root: Node<H, N>,
+
     // The number of keys in flight.
     #[serde(skip)]
     in_flight_keys: u64,
+    #[serde(skip)]
+    in_flight_keys_dirty: bool,
+
     // Tracks updated keys.
     #[serde(skip)]
-    updated_keys: BTreeSet<u64>,
+    updated_keys: HashSet<u64>,
+    #[serde(skip)]
+    updated_keys_dirty: bool,
+
     // The list of roots.
     #[serde(bound(serialize = "Node<H, N>: Serialize"))]
     #[serde(bound(deserialize = "Node<H, N>: Deserialize<'de>"))]
     roots: Vec<Node<H, N>>,
+
     // The number of keys a `Khf` currently provides.
     keys: u64,
-    // Holds keys computed between commits
+
+    // Holds subnodes computed between commits
     #[serde(skip)]
-    cached_keys: HashMap<u64, Key<N>>,
+    cache: HashMap<Pos, Key<N>>,
 }
 
 impl<H, const N: usize> Clone for Khf<H, N> {
@@ -47,10 +62,12 @@ impl<H, const N: usize> Clone for Khf<H, N> {
             topology: self.topology.clone(),
             appending_root: self.appending_root.clone(),
             in_flight_keys: self.in_flight_keys,
+            in_flight_keys_dirty: self.in_flight_keys_dirty,
             updated_keys: self.updated_keys.clone(),
+            updated_keys_dirty: self.updated_keys_dirty,
             roots: self.roots.clone(),
             keys: self.keys,
-            cached_keys: self.cached_keys.clone(),
+            cache: self.cache.clone(),
         }
     }
 }
@@ -77,10 +94,12 @@ where
             topology: Topology::new(fanouts),
             appending_root: Node::with_rng(&mut rng),
             in_flight_keys: 0,
-            updated_keys: BTreeSet::new(),
+            in_flight_keys_dirty: false,
+            updated_keys: HashSet::new(),
+            updated_keys_dirty: false,
             roots: vec![Node::with_rng(&mut rng)],
             keys: 0,
-            cached_keys: HashMap::new(),
+            cache: HashMap::new(),
         }
     }
 
@@ -95,13 +114,21 @@ where
     }
 
     /// The keys that have been updated since the last epoch
-    pub fn updated_keys(&self) -> &BTreeSet<u64> {
+    pub fn updated_keys(&self) -> &HashSet<u64> {
         &self.updated_keys
     }
 
     /// The keys that have been updated since the last epoch
-    pub fn updated_keys_mut(&mut self) -> &mut BTreeSet<u64> {
+    pub fn updated_keys_mut(&mut self) -> &mut HashSet<u64> {
         &mut self.updated_keys
+    }
+
+    /// Marks updated keys as clean (i.e., has been persisted).
+    /// Returns whether or not the updated keys were dirty before cleaning.
+    pub fn fetch_clean_updated_keys(&mut self) -> bool {
+        let res = self.updated_keys_dirty;
+        self.updated_keys_dirty = false;
+        res
     }
 
     /// Consolidates the `Khf` and returns the affected keys.
@@ -134,6 +161,7 @@ where
 
         // Unmark keys as updated and update the whole range of keys.
         self.updated_keys.clear();
+        self.updated_keys_dirty = true;
 
         affected
     }
@@ -165,6 +193,7 @@ where
         // The consolidated range of keys shouldn't be considered as updated.
         for key in &affected {
             self.updated_keys.remove(key);
+            self.updated_keys_dirty = true;
         }
 
         affected
@@ -173,6 +202,7 @@ where
     /// Truncates the `Khf` so it only covers a specified number of keys.
     pub fn truncate(&mut self, keys: u64) {
         self.in_flight_keys = keys;
+        self.in_flight_keys_dirty = true;
     }
 
     /// Derives a key.
@@ -182,7 +212,10 @@ where
         // Derive the key from the appending root if it should be appended.
         if key >= self.keys {
             self.in_flight_keys = self.in_flight_keys.max(key + 1);
-            return self.appending_root.derive(&self.topology, pos);
+            self.in_flight_keys_dirty = true;
+            return self
+                .appending_root
+                .derive_and_cache(&self.topology, pos, &mut self.cache);
         }
 
         // Binary search for the index of the root covering the key.
@@ -199,19 +232,21 @@ where
             })
             .unwrap();
 
-        self.roots[index].derive(&self.topology, pos)
+        self.roots[index].derive_and_cache(&self.topology, pos, &mut self.cache)
     }
 
     fn derive_key_immutable(&self, key: u64) -> Key<N> {
-        if let Some(key) = self.cached_keys.get(&key) {
+        let pos = self.topology.leaf_position(key);
+
+        if let Some(key) = self.cache.get(&pos) {
             return *key;
         }
 
-        let pos = self.topology.leaf_position(key);
-
         // Derive the key from the appending root if it should be appended.
         if key >= self.keys {
-            return self.appending_root.derive(&self.topology, pos);
+            return self
+                .appending_root
+                .derive_cached(&self.topology, pos, &self.cache);
         }
 
         // Binary search for the index of the root covering the key.
@@ -228,7 +263,7 @@ where
             })
             .unwrap();
 
-        self.roots[index].derive(&self.topology, pos)
+        self.roots[index].derive_cached(&self.topology, pos, &self.cache)
     }
 
     fn updated_key_ranges(&self) -> Vec<(u64, u64)> {
@@ -242,7 +277,7 @@ where
         let mut prev = 0;
         let mut leaves = 1;
 
-        for leaf in &self.updated_keys {
+        for leaf in itertools::sorted(self.updated_keys.iter()) {
             if first {
                 first = false;
                 start = *leaf;
@@ -339,17 +374,18 @@ where
     type Error = Error;
 
     fn derive(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        if let Some(k) = self.cached_keys.get(&key) {
+        let pos = self.topology.leaf_position(key);
+
+        if let Some(k) = self.cache.get(&pos) {
             Ok(*k)
         } else {
-            let k = self.derive_key(key);
-            self.cached_keys.insert(key, k);
-            Ok(k)
+            Ok(self.derive_key(key))
         }
     }
 
     fn update(&mut self, key: Self::KeyId) -> Result<Self::Key, Self::Error> {
         self.updated_keys.insert(key);
+        self.updated_keys_dirty = true;
         self.derive(key)
     }
 
@@ -477,7 +513,7 @@ where
         };
 
         // Clear out our cache.
-        self.cached_keys.clear();
+        self.cache.clear();
 
         // Clear out our cache.
         self.cached_keys.clear();
@@ -488,6 +524,7 @@ where
 
         // Clear out the updated keys.
         self.updated_keys.clear();
+        self.updated_keys_dirty = true;
 
         Ok(res)
     }
@@ -588,6 +625,25 @@ mod tests {
                     assert_eq!(o, n);
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn caching() -> Result<()> {
+        let mut keys = HashMap::new();
+        let mut khf = Khf::<Sha3_256, SHA3_256_MD_SIZE>::new(&[4, 4, 4, 4], thread_rng());
+
+        for i in 0..10000 {
+            let key = khf.derive(i).unwrap();
+            keys.insert(i, key);
+        }
+
+        for i in 0..10000 {
+            let cached_key = khf.derive(i).unwrap();
+            let saved_key = keys.get(&i).unwrap();
+            assert_eq!(&cached_key, saved_key);
         }
 
         Ok(())
